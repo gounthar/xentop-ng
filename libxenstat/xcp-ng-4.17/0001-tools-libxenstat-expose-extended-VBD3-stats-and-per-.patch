@@ -1,0 +1,267 @@
+From 8c22df090cbee3a431ffcc8b880f2f46451159d3 Mon Sep 17 00:00:00 2001
+From: Olivier Lambert <olivier.lambert@vates.tech>
+Date: Wed, 30 Sep 2026 23:01:13 +0200
+Subject: [PATCH] tools/libxenstat: expose extended VBD3 stats and per-pCPU
+ idle time
+
+Add new accessors for the xentop-ng monitor:
+
+ - xenstat_vbd_has_ext(), xenstat_vbd_{rd,wr}_reqs_done(),
+   xenstat_vbd_{rd,wr}_usecs() and xenstat_vbd_io_errors() expose the
+   completed request counters, cumulative service time (microseconds,
+   as accounted by tapdisk) and I/O error count that the VBD3 (tapdisk)
+   shared-memory stats already provide but libxenstat dropped.  They are
+   only valid when has_ext is 1; the blkback and qdisk backends do not
+   provide these counters and report has_ext == 0.
+
+ - xenstat_node_pcpu_idle_ns() and xenstat_node_num_pcpu_idle() expose
+   the cumulative idle time of each physical CPU, collected with
+   xc_getcpuinfo() on every xenstat_get_node() call.
+
+New fields are appended to the private structures only, so the existing
+ABI is unchanged.  Also zero the on-stack xenstat_vbd before filling it
+in the Linux VBD collector so no field is left uninitialised.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ tools/include/xenstat.h         | 22 +++++++++
+ tools/libs/stat/xenstat.c       | 87 +++++++++++++++++++++++++++++++++
+ tools/libs/stat/xenstat_linux.c | 10 ++++
+ tools/libs/stat/xenstat_priv.h  | 10 ++++
+ 4 files changed, 129 insertions(+)
+
+diff --git a/tools/include/xenstat.h b/tools/include/xenstat.h
+index c3b98909dd..e197d649c8 100644
+--- a/tools/include/xenstat.h
++++ b/tools/include/xenstat.h
+@@ -83,6 +83,13 @@ unsigned int xenstat_node_num_cpus(xenstat_node * node);
+ /* Get information about the CPU speed */
+ unsigned long long xenstat_node_cpu_hz(xenstat_node * node);
+ 
++/* Get the number of pCPU idle-time slots (max_cpu_id + 1); 0 if unavailable */
++unsigned int xenstat_node_num_pcpu_idle(xenstat_node * node);
++
++/* Get cumulative idle time of physical CPU 'cpu' in ns; 0 if unavailable */
++unsigned long long xenstat_node_pcpu_idle_ns(xenstat_node * node,
++					     unsigned int cpu);
++
+ /*
+  * Domain functions - extract information from a xenstat_domain
+  */
+@@ -194,4 +201,19 @@ unsigned long long xenstat_vbd_wr_sects(xenstat_vbd * vbd);
+ /* Returns error while getting stats (1 if error happened, 0 otherwise) */
+ bool xenstat_vbd_error(xenstat_vbd * vbd);
+ 
++/*
++ * Extended VBD statistics.  Only provided by the VBD3 (tapdisk) backend;
++ * xenstat_vbd_has_ext() returns 1 when the values below are valid and 0
++ * otherwise (in which case they all read as 0).
++ */
++unsigned int xenstat_vbd_has_ext(xenstat_vbd * vbd);
++/* Number of completed READ/WRITE requests */
++unsigned long long xenstat_vbd_rd_reqs_done(xenstat_vbd * vbd);
++unsigned long long xenstat_vbd_wr_reqs_done(xenstat_vbd * vbd);
++/* Cumulative READ/WRITE request service time, in microseconds */
++unsigned long long xenstat_vbd_rd_usecs(xenstat_vbd * vbd);
++unsigned long long xenstat_vbd_wr_usecs(xenstat_vbd * vbd);
++/* Number of requests completed with an I/O error */
++unsigned long long xenstat_vbd_io_errors(xenstat_vbd * vbd);
++
+ #endif /* XENSTAT_H */
+diff --git a/tools/libs/stat/xenstat.c b/tools/libs/stat/xenstat.c
+index 8bab2e66a7..60f17fe73f 100644
+--- a/tools/libs/stat/xenstat.c
++++ b/tools/libs/stat/xenstat.c
+@@ -131,6 +131,37 @@ void xenstat_uninit(xenstat_handle * handle)
+ 	}
+ }
+ 
++/* Collect cumulative idle time for every pCPU (best effort). */
++static void xenstat_collect_pcpu_idle(xenstat_node *node,
++				      const xc_physinfo_t *physinfo)
++{
++	unsigned int max_cpus = physinfo->max_cpu_id + 1;
++	xc_cpuinfo_t *info;
++	int nr = 0, i;
++
++	info = calloc(max_cpus, sizeof(*info));
++	if (info == NULL)
++		return;
++
++	if (xc_getcpuinfo(node->handle->xc_handle, max_cpus, info, &nr) < 0 ||
++	    nr <= 0) {
++		free(info);
++		return;
++	}
++
++	if ((unsigned int)nr > max_cpus)
++		nr = max_cpus;
++
++	node->pcpu_idle_ns = calloc(nr, sizeof(*node->pcpu_idle_ns));
++	if (node->pcpu_idle_ns != NULL) {
++		for (i = 0; i < nr; i++)
++			node->pcpu_idle_ns[i] = info[i].idletime;
++		node->num_pcpu_idle = nr;
++	}
++
++	free(info);
++}
++
+ xenstat_node *xenstat_get_node(xenstat_handle * handle, unsigned int flags)
+ {
+ #define DOMAIN_CHUNK_SIZE 256
+@@ -162,11 +193,14 @@ xenstat_node *xenstat_get_node(xenstat_handle * handle, unsigned int flags)
+ 	node->free_mem = ((unsigned long long)physinfo.free_pages)
+ 	    * handle->page_size;
+ 
++	xenstat_collect_pcpu_idle(node, &physinfo);
++
+ 	node->freeable_mb = 0;
+ 	/* malloc(0) is not portable, so allocate a single domain.  This will
+ 	 * be resized below. */
+ 	node->domains = malloc(sizeof(xenstat_domain));
+ 	if (node->domains == NULL) {
++		free(node->pcpu_idle_ns);
+ 		free(node);
+ 		return NULL;
+ 	}
+@@ -252,6 +286,7 @@ xenstat_node *xenstat_get_node(xenstat_handle * handle, unsigned int flags)
+ 	return node;
+ err:
+ 	free(node->domains);
++	free(node->pcpu_idle_ns);
+ 	free(node);
+ 	return NULL;
+ }
+@@ -271,6 +306,7 @@ void xenstat_free_node(xenstat_node * node)
+ 					collectors[i].free(node);
+ 			free(node->domains);
+ 		}
++		free(node->pcpu_idle_ns);
+ 		free(node);
+ 	}
+ }
+@@ -332,6 +368,21 @@ unsigned long long xenstat_node_cpu_hz(xenstat_node * node)
+ 	return node->cpu_hz;
+ }
+ 
++/* Number of pCPU idle-time slots (max_cpu_id + 1), 0 if unavailable */
++unsigned int xenstat_node_num_pcpu_idle(xenstat_node * node)
++{
++	return node->num_pcpu_idle;
++}
++
++/* Cumulative idle time of pCPU 'cpu' in ns, 0 if unavailable */
++unsigned long long xenstat_node_pcpu_idle_ns(xenstat_node * node,
++					     unsigned int cpu)
++{
++	if (node->pcpu_idle_ns == NULL || cpu >= node->num_pcpu_idle)
++		return 0;
++	return node->pcpu_idle_ns[cpu];
++}
++
+ /* Get the domain ID for this domain */
+ unsigned xenstat_domain_id(xenstat_domain * domain)
+ {
+@@ -704,6 +755,42 @@ bool xenstat_vbd_error(xenstat_vbd * vbd)
+ 	return vbd->error;
+ }
+ 
++/* Extended VBD stats (VBD3/tapdisk only): 1 if valid, 0 otherwise */
++unsigned int xenstat_vbd_has_ext(xenstat_vbd * vbd)
++{
++	return vbd->has_ext;
++}
++
++/* Number of completed READ requests */
++unsigned long long xenstat_vbd_rd_reqs_done(xenstat_vbd * vbd)
++{
++	return vbd->rd_reqs_done;
++}
++
++/* Number of completed WRITE requests */
++unsigned long long xenstat_vbd_wr_reqs_done(xenstat_vbd * vbd)
++{
++	return vbd->wr_reqs_done;
++}
++
++/* Cumulative READ service time, in microseconds */
++unsigned long long xenstat_vbd_rd_usecs(xenstat_vbd * vbd)
++{
++	return vbd->rd_usecs;
++}
++
++/* Cumulative WRITE service time, in microseconds */
++unsigned long long xenstat_vbd_wr_usecs(xenstat_vbd * vbd)
++{
++	return vbd->wr_usecs;
++}
++
++/* Number of requests completed with an I/O error */
++unsigned long long xenstat_vbd_io_errors(xenstat_vbd * vbd)
++{
++	return vbd->io_errors;
++}
++
+ static char *xenstat_get_domain_name(xenstat_handle *handle, unsigned int domain_id)
+ {
+ 	char path[80];
+diff --git a/tools/libs/stat/xenstat_linux.c b/tools/libs/stat/xenstat_linux.c
+index 132b7e6360..4ee7300007 100644
+--- a/tools/libs/stat/xenstat_linux.c
++++ b/tools/libs/stat/xenstat_linux.c
+@@ -418,6 +418,14 @@ static int read_attributes_vbd3(const char *vbd3_path, xenstat_vbd *vbd)
+ 	vbd->wr_reqs = vbd3_stats.write_reqs_submitted;
+ 	vbd->wr_sects = vbd3_stats.write_sectors;
+ 
++	/* tapdisk accumulates *_total_ticks in microseconds */
++	vbd->rd_reqs_done = vbd3_stats.read_reqs_completed;
++	vbd->wr_reqs_done = vbd3_stats.write_reqs_completed;
++	vbd->rd_usecs = vbd3_stats.read_total_ticks;
++	vbd->wr_usecs = vbd3_stats.write_total_ticks;
++	vbd->io_errors = vbd3_stats.io_errors;
++	vbd->has_ext = 1;
++
+ 	fclose(fp);
+ 
+ 	return 0;
+@@ -471,6 +479,8 @@ int xenstat_collect_vbds(xenstat_node * node)
+ 		int ret;
+ 		char buf[256];
+ 
++		memset(&vbd, 0, sizeof(vbd));
++
+ 		ret = sscanf(dp->d_name, "%255[^-]-%u-%u", buf, &domid, &vbd.dev);
+ 		if (ret != 3)
+ 			continue;
+diff --git a/tools/libs/stat/xenstat_priv.h b/tools/libs/stat/xenstat_priv.h
+index 51ff6862cf..aeeb6fc881 100644
+--- a/tools/libs/stat/xenstat_priv.h
++++ b/tools/libs/stat/xenstat_priv.h
+@@ -50,6 +50,9 @@ struct xenstat_node {
+ 	unsigned int num_domains;
+ 	xenstat_domain *domains;	/* Array of length num_domains */
+ 	long freeable_mb;
++	/* Appended fields: keep existing layout intact */
++	unsigned int num_pcpu_idle;	/* Entries in pcpu_idle_ns (max_cpu_id + 1) */
++	unsigned long long *pcpu_idle_ns; /* Cumulative idle time per pCPU, ns */
+ };
+ 
+ struct xenstat_domain {
+@@ -96,6 +99,13 @@ struct xenstat_vbd {
+ 	unsigned long long wr_reqs;
+ 	unsigned long long rd_sects;
+ 	unsigned long long wr_sects;
++	/* Appended fields: only valid when has_ext is set (VBD3/tapdisk) */
++	unsigned int has_ext;
++	unsigned long long rd_reqs_done;
++	unsigned long long wr_reqs_done;
++	unsigned long long rd_usecs;
++	unsigned long long wr_usecs;
++	unsigned long long io_errors;
+ };
+ 
+ /* Interface provided by https://github.com/xapi-project/blktap */
+-- 
+2.55.0
+

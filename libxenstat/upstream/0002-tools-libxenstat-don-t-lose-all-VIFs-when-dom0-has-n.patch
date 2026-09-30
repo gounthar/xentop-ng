@@ -1,0 +1,38 @@
+From 7d3605ed054d92cbbbf8e86e454c249e7a9bec0d Mon Sep 17 00:00:00 2001
+From: Olivier Lambert <olivier.lambert@vates.tech>
+Date: Wed, 30 Sep 2026 23:27:12 +0200
+Subject: [PATCH] tools/libxenstat: don't lose all VIFs when dom0 has no Linux
+ bridge
+
+xenstat_collect_networks() looks for a Linux bridge (a /sys/class/net/*/bridge
+directory) so that, with bonding, dom0 can be given the bridge's counters.
+When there is none, as on any host using Open vSwitch (the XCP-ng default),
+getBridge() leaves devBridge empty. strstr(iface, "") then matches every
+interface, and devNoBridge is just "p", so each VIF whose name has no 'p' in
+it -- i.e. all of them -- takes the bridge branch instead of being attached to
+its domain. Every domain ends up with zero networks, and xentop shows NETS 0.
+
+Only take the bridge branch when a bridge was actually found.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ tools/libs/stat/xenstat_linux.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/tools/libs/stat/xenstat_linux.c b/tools/libs/stat/xenstat_linux.c
+index 9047d28..c4a7a2d 100644
+--- a/tools/libs/stat/xenstat_linux.c
++++ b/tools/libs/stat/xenstat_linux.c
+@@ -322,7 +322,8 @@ int xenstat_collect_networks(xenstat_node * node)
+ 
+ 		/* If the device parsed is network bridge and both tx & rx packets are zero, we are most */
+ 		/* likely using bonding so we alter the configuration for dom0 to have bridge stats */
+-		if ((strstr(iface, devBridge) != NULL) &&
++		if ((devBridge[0] != '\0') &&
++		    (strstr(iface, devBridge) != NULL) &&
+ 		    (strstr(iface, devNoBridge) == NULL) &&
+ 		    ((domain = xenstat_node_domain(node, 0)) != NULL)) {
+ 			for (i = 0; i < domain->num_networks; i++) {
+-- 
+2.55.0
+
