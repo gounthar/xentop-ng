@@ -3,10 +3,18 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
+## [0.3.1] - 2026-10-01
+
+### Changed
+
+- Screenshots of the 0.3.0 features in the README (SR view, domain
+  details), and a refreshed tour GIF.
+- Release notes on GitHub now include the release's CHANGELOG entry.
+
 ## [0.3.0] - 2026-10-01
 
-Screenshots: [SR view](docs/sr-view.png) and [domain details](docs/detail.png)
-(also in the [README](README.md#features)).
+Screenshots: [SR view](https://github.com/olivierlambert/xentop-ng/blob/v0.3.1/docs/sr-view.png) and
+[domain details](https://github.com/olivierlambert/xentop-ng/blob/v0.3.1/docs/detail.png).
 
 ### Added
 
@@ -74,6 +82,7 @@ First public release: same as 0.1.0, with build provenance attestations.
 Initial release: a btop-style Xen monitor with fallbacks for what stock
 libxenstat lacks, security hardening, CI and signed release builds.
 
+[0.3.1]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/olivierlambert/xentop-ng/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/olivierlambert/xentop-ng/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/olivierlambert/xentop-ng/compare/v0.2.0...v0.2.1

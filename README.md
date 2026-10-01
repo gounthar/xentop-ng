@@ -41,8 +41,8 @@ per disk and per network interface.
   current memory.
 - **Storage repositories** (`v`): the disk box switches to per-SR totals
   (IOPS, throughput, read/write latency, the VM doing most of the I/O; SRs
-  by name and exact type on XCP-ng) and
-  the busiest disks. It answers "which SR is slow, and who is hammering it?".
+  by name and exact type on XCP-ng) and the busiest disks. It answers
+  "which SR is slow, and who is hammering it?".
   Rows are ranked by IOPS averaged over about 10 s, and only swap places
   on a clear change, so they stay put long enough to read. An IOPS trend
   per row shows the last samples (one bar each, as many as fit), each bar
