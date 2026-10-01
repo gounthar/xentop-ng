@@ -1,0 +1,1 @@
+/dev/mapper/XSLocalEXT--ac70e429--0dec--3ccd--1d24--2713c6104b65-ac70e429--0dec--3ccd--1d24--2713c6104b65 /run/sr-mount/ac70e429-0dec-3ccd-1d24-2713c6104b65 ext4 rw,relatime 0 0

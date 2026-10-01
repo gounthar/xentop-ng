@@ -2,7 +2,7 @@ mod widgets;
 
 use crate::app::{App, SortKey};
 use crate::fmt;
-use crate::model::{DomRates, DomState, Rates};
+use crate::model::{Backing, DomRates, DomState, Rates};
 use crate::theme::{Gradient, Theme};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -701,18 +701,27 @@ fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     let th = app.theme();
     let h = &r.host;
     let vbds: usize = r.domains.iter().map(|d| d.vbds.len()).sum();
+    let (n, what) = if app.sr_view {
+        (r.srs.len(), if r.srs.len() == 1 { " SR" } else { " SRs" })
+    } else {
+        (vbds, " vbds")
+    };
     let block = boxed(
         th,
         "⁴",
         "disk",
         vec![
-            Span::styled(format!("{vbds}"), Style::new().fg(th.fg)),
-            dim(th, " vbds"),
+            Span::styled(format!("{n}"), Style::new().fg(th.fg)),
+            dim(th, what),
         ],
     );
     let inner = block.inner(area);
     block.render(area, buf);
     if inner.width < 10 {
+        return;
+    }
+    if app.sr_view {
+        sr_table(buf, app, r, inner);
         return;
     }
     let side_w = if inner.width >= 56 { 25 } else { 0 };
@@ -812,6 +821,220 @@ fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             );
         }
     }
+}
+
+/// Columns of the per-SR table.
+#[derive(Clone, Copy, PartialEq)]
+enum SrCol {
+    Sr,
+    Kind,
+    Vbds,
+    Iops,
+    Read,
+    Write,
+    RLat,
+    WLat,
+    Top,
+}
+
+/// SR table columns that fit `width`, the top-VM column taking what's left.
+fn sr_cols(width: usize) -> Vec<(SrCol, usize)> {
+    // (column, width, priority: lower = kept longer)
+    let all = [
+        (SrCol::Sr, 8, 0),
+        (SrCol::Kind, 4, 4),
+        (SrCol::Vbds, 4, 5),
+        (SrCol::Iops, 6, 0),
+        (SrCol::Read, 7, 3),
+        (SrCol::Write, 7, 3),
+        (SrCol::RLat, 7, 2),
+        (SrCol::WLat, 7, 0),
+        (SrCol::Top, 10, 1),
+    ];
+    for max_prio in (0..=5).rev() {
+        let mut cols: Vec<(SrCol, usize)> = all
+            .iter()
+            .filter(|c| c.2 <= max_prio)
+            .map(|c| (c.0, c.1))
+            .collect();
+        let used: usize = cols.iter().map(|c| c.1 + 1).sum();
+        if used <= width || max_prio == 0 {
+            if let Some(c) = cols.iter_mut().find(|c| c.0 == SrCol::Top) {
+                c.1 += width.saturating_sub(used).min(24);
+            }
+            return cols;
+        }
+    }
+    Vec::new()
+}
+
+/// SR UUIDs are shown by their first block, like `xe` users abbreviate
+/// them; other storage keys (directories) by their tail.
+fn short_sr(key: &str, w: usize) -> String {
+    if crate::source::xenstore::uuid(key).is_some() {
+        return key.chars().take(8.min(w)).collect();
+    }
+    trunc_left(key, w)
+}
+
+/// Keep the end of `s` within `w` columns: "…/xen/images".
+fn trunc_left(s: &str, w: usize) -> String {
+    if fmt::width(s) <= w {
+        return s.to_string();
+    }
+    if w == 0 {
+        return String::new();
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 1;
+    for c in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > w {
+            break;
+        }
+        used += cw;
+        tail.push(c);
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
+}
+
+/// Per-SR totals in place of the disk graphs: which SR is slow, and who
+/// is hammering it.
+fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
+    let srs = &r.srs;
+    let th = app.theme();
+    if area.height == 0 {
+        return;
+    }
+    if srs.is_empty() {
+        let msg = "no storage mapping (xenstore); see i   v: graphs";
+        put(buf, area.x, area.y, area.width, &Line::from(dim(th, msg)));
+        return;
+    }
+    let cols = sr_cols(area.width as usize);
+    let mut x = area.x;
+    for (c, w) in &cols {
+        let (t, right) = match c {
+            SrCol::Sr => ("SR", false),
+            SrCol::Kind => ("TYPE", false),
+            SrCol::Vbds => ("VBDS", true),
+            SrCol::Iops => ("IOPS", true),
+            SrCol::Read => ("READ", true),
+            SrCol::Write => ("WRITE", true),
+            SrCol::RLat => ("R LAT", true),
+            SrCol::WLat => ("W LAT", true),
+            SrCol::Top => ("TOP VM", false),
+        };
+        let style = Style::new().fg(th.dim).add_modifier(Modifier::BOLD);
+        buf.set_stringn(x, area.y, fmt::pad(t, *w, right), *w, style);
+        x += *w as u16 + 1;
+    }
+    let rows = area.height as usize - 1;
+    for (i, s) in srs.iter().take(rows).enumerate() {
+        let mut sp: Vec<Span> = Vec::new();
+        for (c, w) in &cols {
+            let w = *w;
+            let num = |v: String, c: Color| Span::styled(fmt::pad(&v, w, true), Style::new().fg(c));
+            match c {
+                SrCol::Sr => sp.push(Span::styled(
+                    fmt::pad(&short_sr(&s.sr, w), w, false),
+                    Style::new().fg(th.fg).add_modifier(Modifier::BOLD),
+                )),
+                SrCol::Kind => sp.push(dim(th, fmt::pad(s.kind.as_deref().unwrap_or("-"), w, false))),
+                SrCol::Vbds => sp.push(dim(th, fmt::pad(&s.vbds.to_string(), w, true))),
+                SrCol::Iops => {
+                    let v = s.iops();
+                    sp.push(num(fmt::count(v), if v < 0.5 { th.dim } else { th.fg }));
+                }
+                SrCol::Read => sp.push(num(fmt::rate(s.rd_bps), th.rd.at(1.0))),
+                SrCol::Write => sp.push(num(fmt::rate(s.wr_bps), th.wr.at(1.0))),
+                SrCol::RLat => sp.push(num(fmt::lat(s.rd_lat_us), lat_color(th, s.rd_lat_us))),
+                SrCol::WLat => sp.push(num(fmt::lat(s.wr_lat_us), lat_color(th, s.wr_lat_us))),
+                SrCol::Top => match s.top_id.filter(|_| s.top_iops >= 0.5) {
+                    // Share of the SR's IOPS, when there is room for it.
+                    Some(id) => {
+                        let share = s.top_iops / s.iops().max(1e-9) * 100.0;
+                        sp.extend(vm_cell(
+                            th,
+                            id,
+                            s.top_name.as_deref().unwrap_or("?"),
+                            Some(share),
+                            w,
+                        ));
+                    }
+                    None => sp.push(dim(th, fmt::pad("-", w, false))),
+                },
+            }
+            sp.push(Span::raw(" "));
+        }
+        put(buf, area.x, area.y + 1 + i as u16, area.width, &Line::from(sp));
+    }
+
+    // Room left: the busiest disks across all SRs, in the same columns.
+    let mut y = area.y + 1 + srs.len().min(rows) as u16;
+    let bottom = area.y + area.height;
+    if y + 3 > bottom {
+        return;
+    }
+    put(
+        buf,
+        area.x,
+        y,
+        area.width,
+        &Line::from(dim(
+            th,
+            format!("{:─<w$}", "── busiest disks ", w = area.width as usize),
+        )),
+    );
+    y += 1;
+    let mut vbds: Vec<(&DomRates, &crate::model::VbdRates)> = r
+        .domains
+        .iter()
+        .flat_map(|d| d.vbds.iter().map(move |v| (d, v)))
+        .filter(|(_, v)| v.backing.group().is_some() && v.rd_iops + v.wr_iops >= 0.5)
+        .collect();
+    vbds.sort_by(|a, b| (b.1.rd_iops + b.1.wr_iops).total_cmp(&(a.1.rd_iops + a.1.wr_iops)));
+    for (d, v) in vbds.into_iter().take((bottom - y) as usize) {
+        let mut sp: Vec<Span> = Vec::new();
+        for (c, w) in &cols {
+            let w = *w;
+            let num = |s: String, c: Color| Span::styled(fmt::pad(&s, w, true), Style::new().fg(c));
+            match c {
+                SrCol::Sr => {
+                    let key = v.backing.group().unwrap_or_default();
+                    sp.push(dim(th, fmt::pad(&short_sr(&key, w), w, false)));
+                }
+                SrCol::Kind => sp.push(Span::styled(fmt::pad(&v.name, w, false), Style::new().fg(th.fg))),
+                SrCol::Vbds => sp.push(Span::raw(" ".repeat(w))),
+                SrCol::Iops => sp.push(num(fmt::count(v.rd_iops + v.wr_iops), th.fg)),
+                SrCol::Read => sp.push(num(fmt::rate(v.rd_bps), th.rd.at(1.0))),
+                SrCol::Write => sp.push(num(fmt::rate(v.wr_bps), th.wr.at(1.0))),
+                SrCol::RLat => sp.push(num(fmt::lat(v.rd_lat_us), lat_color(th, v.rd_lat_us))),
+                SrCol::WLat => sp.push(num(fmt::lat(v.wr_lat_us), lat_color(th, v.wr_lat_us))),
+                SrCol::Top => sp.extend(vm_cell(th, d.id, &d.name, None, w)),
+            }
+            sp.push(Span::raw(" "));
+        }
+        put(buf, area.x, y, area.width, &Line::from(sp));
+        y += 1;
+    }
+}
+
+/// "id name", plus a share in % when given and there is room, in `w`
+/// columns. IDs next to names: anyone who can rename a VM can call it
+/// "Domain-0".
+fn vm_cell(th: &Theme, id: u32, name: &str, share: Option<f64>, w: usize) -> Vec<Span<'static>> {
+    let share = match share {
+        Some(p) if w >= 16 => format!(" {p:>3.0}%"),
+        _ => String::new(),
+    };
+    let idw = format!("{id:>3} ");
+    let nw = w.saturating_sub(idw.len() + share.len());
+    vec![
+        dim(th, idw),
+        Span::styled(fmt::pad(name, nw, false), Style::new().fg(th.fg)),
+        dim(th, share),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,7 +1370,54 @@ fn dom_row(app: &App, th: &Theme, d: &DomRates, cols: &[(Col, usize)]) -> Line<'
 fn detail_height(d: &DomRates, width: u16) -> u16 {
     let per_row = ((width as usize).saturating_sub(2) / 23).max(1);
     let section = |n: usize| if n > 0 { 2 + n } else { 0 };
-    (2 + 1 + 3 + d.vcpu_pct.len().div_ceil(per_row) + section(d.vbds.len()) + section(d.nets.len())) as u16
+    // One more line for the VM UUID, and one under each mapped disk.
+    let extra =
+        d.vm_uuid.is_some() as usize + d.vbds.iter().filter(|v| backing_line_wanted(&v.backing)).count();
+    (2 + 1 + 3 + extra + d.vcpu_pct.len().div_ceil(per_row) + section(d.vbds.len()) + section(d.nets.len()))
+        as u16
+}
+
+fn backing_line_wanted(b: &Backing) -> bool {
+    b.sr.is_some() || b.vdi.is_some() || b.path.is_some()
+}
+
+/// Balloon target, when it is meaningfully away from current memory (a
+/// few MiB of difference is just accounting noise).
+fn balloon_target(d: &DomRates) -> Option<u64> {
+    let t = d.mem_target?;
+    let diff = t.abs_diff(d.mem);
+    (diff > 32 << 20 && diff * 50 > t.max(d.mem)).then_some(t)
+}
+
+/// The line under a disk row saying what backs it.
+fn backing_line(th: &Theme, b: &Backing, w: usize) -> Line<'static> {
+    let mut sp = vec![dim(th, "      └ ")];
+    if b.sr.is_some() || b.vdi.is_some() {
+        sp.push(dim(th, "sr "));
+        sp.push(Span::styled(
+            b.sr.as_deref().map(|s| short_sr(s, 8)).unwrap_or("?".into()),
+            Style::new().fg(th.fg),
+        ));
+        if let Some(k) = &b.sr_kind {
+            sp.push(dim(th, format!(" {k}")));
+        }
+        if let Some(v) = &b.vdi {
+            sp.push(dim(th, "  vdi "));
+            sp.push(Span::styled(v.clone(), Style::new().fg(th.fg)));
+        } else if let Some(p) = &b.path {
+            sp.push(dim(th, "  "));
+            sp.push(Span::styled(
+                trunc_left(p, w.saturating_sub(30)),
+                Style::new().fg(th.fg),
+            ));
+        }
+    } else if let Some(p) = &b.path {
+        sp.push(Span::styled(
+            trunc_left(p, w.saturating_sub(8)),
+            Style::new().fg(th.fg),
+        ));
+    }
+    Line::from(sp)
 }
 
 fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
@@ -1202,7 +1472,20 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
         ),
         bold(fmt::bytes(d.mem as f64), th.mem.at(0.7)),
         dim(th, format!(" / {}", fmt::bytes(d.max_mem as f64))),
+        match balloon_target(d) {
+            Some(t) => Span::styled(
+                format!(" (balloon target {})", fmt::bytes(t as f64)),
+                Style::new().fg(th.warn)
+            ),
+            None => Span::raw(""),
+        },
     ]));
+    if let Some(u) = &d.vm_uuid {
+        line!(Line::from(vec![
+            dim(th, "vm uuid "),
+            Span::styled(u.clone(), Style::new().fg(th.fg)),
+        ]));
+    }
 
     // CPU history graph.
     let gh = if inner.height >= 30 { 6 } else { 3 };
@@ -1280,6 +1563,9 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
                     Style::new().fg(if v.errors > 0 { th.bad } else { th.dim }),
                 ),
             ]));
+            if backing_line_wanted(&v.backing) {
+                line!(backing_line(th, &v.backing, w));
+            }
         }
     }
 
@@ -1333,6 +1619,7 @@ fn help_popup(buf: &mut Buffer, th: &Theme, area: Rect) {
         ("/  f", "filter by name or id"),
         ("1 2 3 4", "toggle cpu / mem / net / disk boxes"),
         ("5", "domains only (again: restore boxes)"),
+        ("v", "disk box: graphs / per-SR totals"),
         ("+  -", "slower / faster refresh"),
         ("p", "pause sampling"),
         ("t  T", "cycle colour theme"),
@@ -1425,6 +1712,19 @@ fn info_popup(buf: &mut Buffer, app: &App, area: Rect) {
             "missing",
             "n/a",
         ),
+        // Never in libxenstat, so "from xenstore" is the normal case.
+        {
+            let (mark, c, how) = match st.storage {
+                Avail::Lib | Avail::Fallback => ("✓", th.ok, "xenstore (VBD backend params, /vm)"),
+                Avail::Missing => ("✗", th.bad, "missing: xenstore unreadable or unmapped"),
+                Avail::NotApplicable => ("·", th.dim, "n/a: no disks"),
+            };
+            Line::from(vec![
+                Span::styled(format!("{mark} "), Style::new().fg(c)),
+                Span::styled(format!("{:<20}", "SR/VDI, VM UUIDs"), Style::new().fg(th.fg)),
+                Span::styled(how, Style::new().fg(if c == th.ok { th.dim } else { c })),
+            ])
+        },
         Line::from(""),
         Line::from(dim(th, "Fallbacks fill in what this libxenstat lacks. The")),
         Line::from(dim(th, "libxenstat patches in the xentop-ng repository")),
@@ -1478,11 +1778,15 @@ mod tests {
             for &w in &sizes {
                 for &h in sizes.iter().filter(|&&h| h <= 80) {
                     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    // Graphs, SR table, SR table + details (+ popups),
+                    // graphs + details.
                     for keys in [
                         &[][..],
+                        &[KeyCode::Char('v')],
                         &[KeyCode::Down, KeyCode::Enter],
                         &[KeyCode::Char('?')],
                         &[KeyCode::Char('i')],
+                        &[KeyCode::Char('v')],
                     ] {
                         for k in keys {
                             a.on_key(KeyEvent::from(*k));
@@ -1492,8 +1796,35 @@ mod tests {
                         a.info = false;
                     }
                     a.detail = false;
+                    a.sr_view = false;
                 }
             }
         }
+    }
+
+    /// The SR view with nothing to show (no xenstore), and with storage
+    /// keys that aren't SR UUIDs (plain Xen: backing directories).
+    #[test]
+    fn sr_view_edge_cases() {
+        let mut a = app(&DemoConfig::default());
+        a.sr_view = true;
+        let r = a.rates.as_mut().unwrap();
+        r.srs.truncate(2);
+        r.srs[0].sr = "/very/long/path/to/some/xen/images/directory".into();
+        r.srs[1].top_id = Some(123456);
+        r.srs[1].top_name = Some("宽字符名".repeat(10));
+        for (w, h) in [(40, 30), (80, 40), (200, 60)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| super::draw(f, &mut a)).unwrap();
+        }
+        a.rates.as_mut().unwrap().srs.clear();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| super::draw(f, &mut a)).unwrap();
+        assert_eq!(
+            super::short_sr("ac70e429-0dec-3ccd-1d24-2713c6104b65", 8),
+            "ac70e429"
+        );
+        assert_eq!(super::trunc_left("/var/lib/xen/images", 8), "…/images");
+        assert_eq!(super::trunc_left("/srv", 8), "/srv");
     }
 }

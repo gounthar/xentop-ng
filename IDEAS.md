@@ -73,8 +73,10 @@ something expensive for a few seconds and shows it in place.
 
 ## XCP-ng integration
 
-- VM UUIDs and name-labels from xenstore (`/vm/<uuid>`); map VBD → VDI → SR,
-  so latency can be aggregated per storage repository.
+- ~~VM UUIDs from xenstore; map VBD → VDI → SR, so latency can be aggregated
+  per storage repository.~~ Done: detail panel, `v` SR view, `--batch`.
+  Still missing: SR/VDI **name-labels** (xapi only), and per-SR history
+  graphs.
 - **Pool view:** poll several hosts over SSH, or read xcp-rrdd / Xen Orchestra
   data, for a cluster-wide top.
 - Optional read-only xapi mode for richer names: SR types, networks.

@@ -67,6 +67,8 @@ pub struct App {
     pub status: DataStatus,
     pub theme: usize,
     pub show: [bool; 4],
+    /// Disk box shows per-SR totals instead of throughput graphs (`v`).
+    pub sr_view: bool,
     /// Box layout to restore when leaving domains-only mode (`5`).
     saved_show: Option<[bool; 4]>,
     pub error: Option<String>,
@@ -102,6 +104,7 @@ impl App {
             status: DataStatus::default(),
             theme,
             show: [true; 4],
+            sr_view: false,
             saved_show: None,
             error: None,
             quit: false,
@@ -153,7 +156,13 @@ impl App {
         let mut v: Vec<&DomRates> = r
             .domains
             .iter()
-            .filter(|d| f.is_empty() || d.name.to_lowercase().contains(&f) || d.id.to_string() == f)
+            .filter(|d| {
+                f.is_empty()
+                    || d.name.to_lowercase().contains(&f)
+                    || d.id.to_string() == f
+                    // VM UUID prefix, as pasted from XO or `xe`.
+                    || (f.len() >= 4 && d.vm_uuid.as_deref().is_some_and(|u| u.starts_with(&f)))
+            })
             .collect();
         let key = self.sort;
         let desc = key.descending() != self.reverse;
@@ -285,6 +294,14 @@ impl App {
                 self.saved_show = None;
             }
             KeyCode::Char('5') => self.toggle_domains_only(),
+            KeyCode::Char('v') => {
+                self.sr_view = !self.sr_view;
+                // Asking for the SR view means wanting to see it.
+                if self.sr_view && !self.show[3] {
+                    self.show[3] = true;
+                    self.saved_show = None;
+                }
+            }
             _ => {}
         }
     }

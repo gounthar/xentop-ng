@@ -7,6 +7,7 @@
 //! columns simply show "-".
 
 use super::fallback::{self, Vbd3Index, XcCpuInfo};
+use super::xenstore::StorageMap;
 use super::{Avail, DataStatus, Source};
 use crate::model::*;
 use anyhow::{anyhow, bail, Context, Result};
@@ -94,6 +95,8 @@ pub struct XenstatSource {
     hostname: String,
     /// pCPU idle fallback, opened when libxenstat lacks pcpu_idle_ns.
     xc: Option<XcCpuInfo>,
+    /// VM UUIDs, balloon targets and VBD -> SR/VDI, from xenstore.
+    storage: StorageMap,
     status: DataStatus,
     // Keeps the function pointers above valid; declared last so it is
     // dropped after `handle` has been released in Drop.
@@ -233,6 +236,7 @@ impl XenstatSource {
             lib_name,
             hostname,
             xc,
+            storage: StorageMap::open(),
             status: DataStatus::default(),
             _lib: lib,
         })
@@ -371,6 +375,7 @@ impl Source for XenstatSource {
                             wr_sects: (a.vbd_wr_sects)(x),
                             error: a.vbd_error.map(|f| f(x)).unwrap_or(false),
                             ext,
+                            backing: None,
                         })
                     })
                     .collect();
@@ -385,6 +390,8 @@ impl Source for XenstatSource {
                     max_mem: (a.domain_max_mem)(dp),
                     nets,
                     vbds,
+                    vm_uuid: None,
+                    mem_target: None,
                 });
             }
 
@@ -403,6 +410,7 @@ impl Source for XenstatSource {
         unsafe { (a.free_node)(node) };
         let mut snap = snap;
         self.fill_gaps(&mut snap);
+        self.status.storage = self.storage.fill(&mut snap);
         Ok(snap)
     }
 

@@ -1,6 +1,7 @@
 pub mod demo;
 pub mod fallback;
 pub mod xenstat;
+pub mod xenstore;
 
 use crate::model::Snapshot;
 
@@ -24,12 +25,17 @@ pub struct DataStatus {
     pub pcpu: Avail,
     pub vbd_latency: Avail,
     pub vifs: Avail,
+    /// VBD -> SR/VDI mapping, VM UUIDs and balloon targets. libxenstat
+    /// never has these: `Fallback` means read from xenstore.
+    pub storage: Avail,
 }
 
 impl DataStatus {
     pub fn degraded(&self) -> bool {
-        [self.pcpu, self.vbd_latency, self.vifs].contains(&Avail::Missing)
+        [self.pcpu, self.vbd_latency, self.vifs, self.storage].contains(&Avail::Missing)
     }
+    /// Storage mapping always comes from xenstore, so it doesn't count:
+    /// this flags gaps in libxenstat only.
     pub fn uses_fallback(&self) -> bool {
         [self.pcpu, self.vbd_latency, self.vifs].contains(&Avail::Fallback)
     }

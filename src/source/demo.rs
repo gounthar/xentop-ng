@@ -29,6 +29,42 @@ impl Rng {
     fn range(&mut self, lo: f64, hi: f64) -> f64 {
         lo + (hi - lo) * self.f()
     }
+    fn uuid(&mut self) -> String {
+        let (a, b) = (self.next(), self.next());
+        format!(
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            a >> 32,
+            (a >> 16) & 0xffff,
+            a & 0xffff,
+            b >> 48,
+            b & 0xffff_ffff_ffff
+        )
+    }
+}
+
+/// Simulated SRs: (name, kind, latency multiplier, IOPS knee). Names are
+/// only for the code; like on a real host without xapi, the UI shows UUIDs.
+const SRS: [(&str, &str, f64, f64); 3] = [
+    ("local-ssd", "ext", 0.5, 120_000.0),
+    ("nfs-vm-store", "nfs", 2.2, 12_000.0),
+    ("iscsi-lvm", "lvm", 1.3, 40_000.0),
+];
+const SR_SSD: usize = 0;
+const SR_NFS: usize = 1;
+const SR_ISCSI: usize = 2;
+
+/// Which SR a VM's disk `i` lives on.
+fn sr_for(name: &str, i: usize) -> usize {
+    let first = |sr: usize| if i == 0 { sr } else { SR_ISCSI };
+    if name.starts_with("pg-") || name.starts_with("ml-") || name.starts_with("hana") {
+        first(SR_SSD)
+    } else if name.starts_with("IO-lab") {
+        SR_SSD
+    } else if name.starts_with("win") {
+        SR_ISCSI
+    } else {
+        SR_NFS
+    }
 }
 
 #[derive(Clone)]
@@ -57,13 +93,30 @@ struct SimDisk {
     share: f64,
     raw: VbdRaw,
     ext: VbdExt,
+    /// Index into `DemoSource::srs`.
+    sr: usize,
+}
+
+/// A simulated storage repository. Each has its own latency profile, and
+/// gets slower as the VMs on it push it towards its IOPS knee.
+struct SimSr {
+    uuid: String,
+    kind: &'static str,
+    lat_mult: f64,
+    /// Total IOPS at which the SR's latency has grown by 60%.
+    knee: f64,
+    /// IOPS over the last step, smoothed.
+    iops: f64,
 }
 
 struct SimDom {
     id: u32,
     name: String,
+    uuid: String,
     mem: u64,
     max_mem: u64,
+    /// Balloon target, when different from `mem` (ballooning in progress).
+    mem_target: Option<u64>,
     prof: Profile,
     phase: f64,
     burst: f64,
@@ -93,6 +146,7 @@ pub struct DemoSource {
     /// Guest memory multiplier, applied to CI jobs too.
     mem_k: f64,
     pcpu_idle: Vec<u64>,
+    srs: Vec<SimSr>,
     doms: Vec<SimDom>,
     next_id: u32,
     ci_seq: u32,
@@ -169,8 +223,20 @@ impl DemoSource {
             | 1;
         let now = Instant::now();
         let scale = pcpus as f64 / 16.0;
+        let mut rng = Rng(seed);
+        let srs = SRS
+            .iter()
+            .map(|&(_, kind, lat_mult, knee)| SimSr {
+                uuid: rng.uuid(),
+                kind,
+                lat_mult,
+                // Bigger hosts come with bigger arrays.
+                knee: knee * scale.max(0.25),
+                iops: 0.0,
+            })
+            .collect();
         let mut s = DemoSource {
-            rng: Rng(seed),
+            rng,
             sim_t: 0.0,
             last: now,
             pcpus,
@@ -180,6 +246,7 @@ impl DemoSource {
             stock: cfg.stock,
             mem_k: 1.0,
             pcpu_idle: vec![0; pcpus as usize],
+            srs,
             doms: Vec::new(),
             next_id: 0,
             ci_seq: 1041,
@@ -531,11 +598,22 @@ impl DemoSource {
         let total: f64 = shares.iter().sum();
         shares.iter_mut().for_each(|s| *s /= total);
         let phase = self.rng.range(0.0, TAU);
+        let uuid = self.rng.uuid();
+        // XAPI publishes a balloon target for every guest; a couple are
+        // being squeezed (or grown back) right now.
+        let mem_target = match name {
+            "Domain-0" => None,
+            "win2022-ad" => Some(mem * 3 / 4),
+            "k8s-worker-2" | "pg-replica" => Some(mem - mem / 6),
+            _ => Some(mem),
+        };
         self.doms.push(SimDom {
             id,
             name: name.into(),
+            uuid,
             mem,
             max_mem,
+            mem_target,
             prof,
             phase,
             burst: 0.0,
@@ -546,6 +624,13 @@ impl DemoSource {
                 .enumerate()
                 .map(|(i, share)| {
                     let dev = 51712 + 16 * i as u32;
+                    let sr = sr_for(name, i);
+                    let backing = Backing {
+                        sr: Some(self.srs[sr].uuid.clone()),
+                        vdi: Some(self.rng.uuid()),
+                        sr_kind: Some(self.srs[sr].kind.into()),
+                        path: None,
+                    };
                     let kind = if id == 0 { VbdKind::Blkback } else { VbdKind::Vbd3 };
                     SimDisk {
                         kind,
@@ -560,8 +645,10 @@ impl DemoSource {
                             wr_sects: 0,
                             error: false,
                             ext: None,
+                            backing: Some(backing),
                         },
                         ext: VbdExt::default(),
+                        sr,
                     }
                 })
                 .collect(),
@@ -613,6 +700,7 @@ impl DemoSource {
 
         let n = self.pcpus as usize;
         let mut pcpu_load = vec![0f64; n];
+        let mut sr_iops = vec![0f64; self.srs.len()];
         let rot = (t / 7.0) as usize;
 
         for d in &mut self.doms {
@@ -663,7 +751,14 @@ impl DemoSource {
                 let r = p.rd_iops * disk.share * io_level * self.rng.range(0.85, 1.15);
                 let w = p.wr_iops * disk.share * io_level * self.rng.range(0.85, 1.15);
                 let load = (r + w) / p.iops_knee;
-                let lat = p.lat_us * (1.0 + load * load) * self.rng.range(0.9, 1.1);
+                let sr = &self.srs[disk.sr];
+                let sr_load = sr.iops / sr.knee;
+                let lat = p.lat_us
+                    * sr.lat_mult
+                    * (1.0 + load * load)
+                    * (1.0 + 0.6 * sr_load * sr_load)
+                    * self.rng.range(0.9, 1.1);
+                sr_iops[disk.sr] += r + w;
                 let (nr, nw) = ((r * dt) as u64, (w * dt) as u64);
                 let raw = &mut disk.raw;
                 raw.rd_reqs += nr;
@@ -697,6 +792,11 @@ impl DemoSource {
             }
         }
 
+        let k = 1.0 - (-dt / 2.0).exp();
+        for (sr, iops) in self.srs.iter_mut().zip(sr_iops) {
+            sr.iops += (iops - sr.iops) * k;
+        }
+
         for (idle, load) in self.pcpu_idle.iter_mut().zip(&pcpu_load) {
             let busy = (load + self.rng.range(0.0, 0.02)).min(1.0);
             *idle += ((1.0 - busy) * dt * 1e9) as u64;
@@ -727,6 +827,8 @@ impl Source for DemoSource {
             pcpu: m,
             vbd_latency: m,
             vifs: Avail::Lib,
+            // Simulated xenstore; independent of the libxenstat flavour.
+            storage: Avail::Fallback,
         }
     }
 
@@ -788,9 +890,11 @@ impl DemoSource {
                         .iter()
                         .map(|x| VbdRaw {
                             ext: if self.stock { None } else { x.raw.ext },
-                            ..x.raw
+                            ..x.raw.clone()
                         })
                         .collect(),
+                    vm_uuid: Some(d.uuid.clone()),
+                    mem_target: d.mem_target,
                 })
                 .collect(),
         }

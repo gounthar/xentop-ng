@@ -30,7 +30,13 @@ per disk and per network interface.
   memory, network, disk throughput, IOPS and latency. Columns adapt to the
   terminal width.
 - **Domain details** (`⏎`): per-vCPU load, per-disk IOPS/throughput/latency,
-  per-vif traffic, packets and errors.
+  per-vif traffic, packets and errors. On XCP-ng: the VM UUID, each disk's
+  SR and VDI, and the balloon target when it differs from current memory.
+- **Storage repositories** (`v`): the disk box switches to per-SR totals
+  (IOPS, throughput, read/write latency, the VM doing most of the I/O) and
+  the busiest disks. Answers "which SR is slow, and who is hammering it".
+  On other Xen hosts, disks are grouped by the directory or volume group
+  that holds them.
 - **Themes**: `btop`, `xcp-ng`, `dracula`, `gruvbox`.
 - **Domains only**: `5` (or `--domains-only`) hides every other box; `5`
   again brings them back.
@@ -118,6 +124,15 @@ whatever the loaded libxenstat lacks by itself:
 | Per-pCPU load and heatmap | – | ✓ via libxenctrl `xc_getcpuinfo()` | ✓ |
 | Disk latency (tapdisk3 VBDs) | – | ✓ reads tapdisk3's stats in `/dev/shm` | ✓ |
 | Network on Open vSwitch hosts (XCP-ng default) | ✗ every VIF lost ([bug](libxenstat/README.md#0002-vifs-missing-on-open-vswitch-hosts)) | ✓ from `/proc/net/dev` | ✓ |
+| VM UUID, balloon target, disk → SR/VDI (or backing path) | – | ✓ from xenstore | ✓ from xenstore |
+
+Storage mapping never comes from libxenstat. xentop-ng reads it from
+xenstore through `libxenstore.so` (also loaded at runtime): each domain's
+`vm` and `memory/target` nodes, and each disk's backend `params`, e.g.
+`/dev/sm/backend/<sr>/<vdi>` on XCP-ng. The SR type (ext, nfs, lvm...) comes
+from where `/dev/sm/phy/<sr>/<vdi>` points and `/proc/mounts`. SR and VDI
+*names* live in xapi only, so the UI shows UUIDs (the first block in
+tables, in full in the details and in `--batch`).
 
 When something is filled in by a fallback or missing altogether, the header
 shows a discreet **◐** marker. Press **`i`** for the data sources panel,
@@ -155,6 +170,9 @@ dist/package.sh v0.1.0        # or: release archives in build/out/release/
 - **Fallback files:** stats files in world-writable `/dev/shm` are only
   trusted if they and their directory are root-owned, opened without
   following symlinks, and belong to a live tapdisk.
+- **xenstore values** (backing paths, VM paths) are length-bounded and
+  sanitised like names. UUIDs are validated before they are used to build
+  any path, so a crafted value can't point xentop-ng elsewhere.
 - **sudo:** don't grant xentop-ng to other users through `sudo`. If you do
   anyway, `--lib` only accepts root-owned files in root-owned directories.
 
@@ -170,9 +188,10 @@ Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 | `c` `m` `n` `d` `l` | sort by cpu, memory, network, disk, latency |
 | `r` | reverse sort |
 | `0` | pin Domain-0 on top |
-| `/` or `f` | filter by name or id |
+| `/` or `f` | filter by name, id or VM UUID prefix |
 | `1` `2` `3` `4` | toggle cpu / mem / net / disk boxes |
 | `5` | domains only; press again to bring the boxes back (`--domains-only` starts that way) |
+| `v` | disk box: throughput graphs or per-SR totals and busiest disks |
 | `+` `-` | slower / faster refresh |
 | `p` | pause |
 | `t` `T` | cycle themes |
@@ -195,7 +214,9 @@ xentop-ng --batch -d 1 -n 60 > run.jsonl
 
 Each line is a JSON object with host and per-domain rates: CPU %, per-vCPU %,
 network B/s and pps, disk B/s, IOPS and latency, per VBD and per VIF. This is
-handy next to a benchmark run.
+handy next to a benchmark run. Domains carry `vm_uuid` and `mem_target`
+(bytes), VBDs `sr`, `vdi`, `sr_kind` and `path`, and `srs` holds the per-SR
+totals (full UUIDs, latency, top VM by IOPS). Unknown values are `null`.
 
 ## Layout
 
@@ -203,6 +224,7 @@ handy next to a benchmark run.
 src/
   source/xenstat.rs   libxenstat binding (dlopen, optional extended symbols)
   source/fallback.rs  collectors for what the loaded libxenstat lacks
+  source/xenstore.rs  VM UUIDs, balloon targets, VBD → SR/VDI from xenstore
   source/demo.rs      simulated host
   model.rs            raw counters → per-interval rates
   history.rs          ring buffers behind the graphs

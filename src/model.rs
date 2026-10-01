@@ -56,6 +56,10 @@ pub struct DomainRaw {
     pub max_mem: u64,
     pub nets: Vec<NetRaw>,
     pub vbds: Vec<VbdRaw>,
+    /// XAPI VM UUID, from xenstore (`/local/domain/<id>/vm`).
+    pub vm_uuid: Option<String>,
+    /// Balloon target in bytes (xenstore `memory/target`).
+    pub mem_target: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -108,7 +112,7 @@ impl VbdKind {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct VbdRaw {
     pub dev: u32,
     pub kind: VbdKind,
@@ -119,6 +123,36 @@ pub struct VbdRaw {
     pub wr_sects: u64,
     pub error: bool,
     pub ext: Option<VbdExt>,
+    /// What the disk is backed by, from xenstore; `None` when unknown.
+    pub backing: Option<Backing>,
+}
+
+/// Where a VBD's data lives: an XCP-ng SR/VDI pair, or a plain path on
+/// other Xen hosts. All strings are sanitised and bounded by the source.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Backing {
+    /// Storage repository UUID.
+    pub sr: Option<String>,
+    /// Virtual disk image UUID.
+    pub vdi: Option<String>,
+    /// SR flavour when it can be told without xapi: "ext", "nfs", "lvm"...
+    pub sr_kind: Option<String>,
+    /// Backing path when there is no SR (plain blkback/qdisk), or for SR
+    /// files that are not VDIs (ISOs).
+    pub path: Option<String>,
+}
+
+impl Backing {
+    /// What disks are grouped by for per-storage totals: the SR, or else
+    /// the directory holding the backing file/device.
+    pub fn group(&self) -> Option<String> {
+        if let Some(sr) = &self.sr {
+            return Some(sr.clone());
+        }
+        let p = self.path.as_deref()?;
+        let (dir, _) = p.rsplit_once('/')?;
+        Some(if dir.is_empty() { "/".into() } else { dir.into() })
+    }
 }
 
 /// Extended per-VBD counters (tapdisk3 only, patched libxenstat).
@@ -187,6 +221,9 @@ pub struct DomRates {
     pub disk_errors: u64,
     pub vbds: Vec<VbdRates>,
     pub nets: Vec<NetRates>,
+    pub vm_uuid: Option<String>,
+    /// Balloon target (bytes), when the toolstack publishes one.
+    pub mem_target: Option<u64>,
 }
 
 impl DomRates {
@@ -218,6 +255,35 @@ pub struct VbdRates {
     pub wr_lat_us: Option<f64>,
     pub oo_ps: f64,
     pub errors: u64,
+    #[serde(flatten)]
+    pub backing: Backing,
+}
+
+/// Totals for one storage repository (or backing directory), over every
+/// VBD on it.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SrRates {
+    /// SR UUID, or the backing directory when there is no SR.
+    pub sr: String,
+    pub kind: Option<String>,
+    pub vbds: usize,
+    pub rd_bps: f64,
+    pub wr_bps: f64,
+    pub rd_iops: f64,
+    pub wr_iops: f64,
+    /// Request-weighted mean service latency (µs), tapdisk3 VBDs only.
+    pub rd_lat_us: Option<f64>,
+    pub wr_lat_us: Option<f64>,
+    /// Domain issuing the most IOPS on this SR.
+    pub top_id: Option<u32>,
+    pub top_name: Option<String>,
+    pub top_iops: f64,
+}
+
+impl SrRates {
+    pub fn iops(&self) -> f64 {
+        self.rd_iops + self.wr_iops
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -236,6 +302,47 @@ pub struct Rates {
     pub interval_s: f64,
     pub host: HostRates,
     pub domains: Vec<DomRates>,
+    /// Per-SR totals, busiest first. Empty without storage mapping.
+    pub srs: Vec<SrRates>,
+}
+
+/// Running sums for one SR while computing rates.
+#[derive(Default)]
+struct SrAcc {
+    r: SrRates,
+    rd_us: u64,
+    wr_us: u64,
+    rd_done: u64,
+    wr_done: u64,
+    /// IOPS per domain on this SR.
+    per_dom: HashMap<u32, f64>,
+}
+
+/// Fold per-SR sums into the final, busiest-first list.
+fn finish_srs(acc: HashMap<String, SrAcc>, domains: &[DomRates]) -> Vec<SrRates> {
+    let names: HashMap<u32, &str> = domains.iter().map(|d| (d.id, d.name.as_str())).collect();
+    let mut v: Vec<SrRates> = acc
+        .into_iter()
+        .map(|(sr, a)| {
+            let mut r = a.r;
+            r.sr = sr;
+            r.rd_lat_us = lat(a.rd_us, a.rd_done);
+            r.wr_lat_us = lat(a.wr_us, a.wr_done);
+            // Ties go to the lowest domid so the pick doesn't flicker.
+            if let Some((&id, &iops)) = a
+                .per_dom
+                .iter()
+                .max_by(|x, y| x.1.total_cmp(y.1).then(y.0.cmp(x.0)))
+            {
+                r.top_id = Some(id);
+                r.top_name = names.get(&id).map(|n| n.to_string());
+                r.top_iops = iops;
+            }
+            r
+        })
+        .collect();
+    v.sort_by(|a, b| b.iops().total_cmp(&a.iops()).then_with(|| a.sr.cmp(&b.sr)));
+    v
 }
 
 /// Counter delta that survives resets (domain reboot, device replug).
@@ -295,6 +402,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
 
     let (mut h_rd_us, mut h_wr_us, mut h_rd_done, mut h_wr_done) = (0u64, 0u64, 0u64, 0u64);
     let mut dom_cpu_total = 0f64;
+    let mut srs: HashMap<String, SrAcc> = HashMap::new();
 
     let mut domains = Vec::with_capacity(cur.domains.len());
     for dom in &cur.domains {
@@ -305,6 +413,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             state: Some(dom.state),
             mem: dom.cur_mem,
             max_mem: dom.max_mem,
+            vm_uuid: dom.vm_uuid.clone(),
+            mem_target: dom.mem_target,
             vcpus_online: dom.vcpus.iter().filter(|v| v.online).count(),
             ..Default::default()
         };
@@ -360,8 +470,11 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                     .map(|e| e.io_errors)
                     .unwrap_or(0)
                     .saturating_add(v.error as u64),
+                backing: v.backing.clone().unwrap_or_default(),
                 ..Default::default()
             };
+            // Completed requests and their service time this interval.
+            let (mut ru, mut wu, mut rn, mut wn) = (0u64, 0u64, 0u64, 0u64);
             // No in-flight estimate: tapdisk counts empty flushes as
             // submitted writes but never as completed ones, so
             // submitted - completed drifts upward forever.
@@ -372,8 +485,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                 vr.wr_iops = d(v.wr_reqs, pv.wr_reqs) as f64 / dt;
                 vr.oo_ps = d(v.oo_reqs, pv.oo_reqs) as f64 / dt;
                 if let (Some(e), Some(pe)) = (v.ext, pv.ext) {
-                    let (ru, wu) = (d(e.rd_usecs, pe.rd_usecs), d(e.wr_usecs, pe.wr_usecs));
-                    let (rn, wn) = (d(e.rd_done, pe.rd_done), d(e.wr_done, pe.wr_done));
+                    (ru, wu) = (d(e.rd_usecs, pe.rd_usecs), d(e.wr_usecs, pe.wr_usecs));
+                    (rn, wn) = (d(e.rd_done, pe.rd_done), d(e.wr_done, pe.wr_done));
                     vr.rd_lat_us = lat(ru, rn);
                     vr.wr_lat_us = lat(wu, wn);
                     rd_us = rd_us.saturating_add(ru);
@@ -388,6 +501,22 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             r.disk_wr_iops += vr.wr_iops;
             r.disk_oo_ps += vr.oo_ps;
             r.disk_errors = r.disk_errors.saturating_add(vr.errors);
+            if let Some(key) = vr.backing.group() {
+                let a = srs.entry(key).or_default();
+                a.r.vbds += 1;
+                if a.r.kind.is_none() {
+                    a.r.kind = vr.backing.sr_kind.clone();
+                }
+                a.r.rd_bps += vr.rd_bps;
+                a.r.wr_bps += vr.wr_bps;
+                a.r.rd_iops += vr.rd_iops;
+                a.r.wr_iops += vr.wr_iops;
+                a.rd_us = a.rd_us.saturating_add(ru);
+                a.wr_us = a.wr_us.saturating_add(wu);
+                a.rd_done = a.rd_done.saturating_add(rn);
+                a.wr_done = a.wr_done.saturating_add(wn);
+                *a.per_dom.entry(dom.id).or_default() += vr.rd_iops + vr.wr_iops;
+            }
             r.vbds.push(vr);
         }
         r.disk_rd_lat_us = lat(rd_us, rd_done);
@@ -425,10 +554,12 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
         }
     }
 
+    let srs = finish_srs(srs, &domains);
     Rates {
         interval_s: dt,
         host,
         domains,
+        srs,
     }
 }
 
@@ -488,7 +619,10 @@ mod rate_tests {
                 wr_sects: 0,
                 error: false,
                 ext: None,
+                backing: None,
             }],
+            vm_uuid: None,
+            mem_target: None,
         }
     }
 
@@ -516,6 +650,101 @@ mod rate_tests {
         );
         // No previous sample for "new": no bogus 400% spike.
         assert_eq!(r.domains[0].cpu_pct, 0.0);
+    }
+
+    /// A VBD on `sr` that did `reqs` reads taking `us` µs in all, plus the
+    /// same number of writes taking twice as long.
+    fn on_sr(sr: Option<&str>, reqs: u64, us: u64) -> VbdRaw {
+        VbdRaw {
+            dev: 51712,
+            kind: VbdKind::Vbd3,
+            oo_reqs: 0,
+            rd_reqs: reqs,
+            wr_reqs: reqs,
+            rd_sects: reqs * 8,
+            wr_sects: 0,
+            error: false,
+            ext: Some(VbdExt {
+                rd_done: reqs,
+                wr_done: reqs,
+                rd_usecs: us,
+                wr_usecs: us * 2,
+                io_errors: 0,
+            }),
+            backing: sr.map(|s| Backing {
+                sr: Some(s.into()),
+                vdi: None,
+                sr_kind: Some("nfs".into()),
+                path: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn per_sr_totals() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(2);
+        let mk = |id: u32, vbds: Vec<VbdRaw>| DomainRaw {
+            vbds,
+            ..dom(id, &format!("vm{id}"), 0, 0)
+        };
+        let zero = |sr| on_sr(sr, 0, 0);
+        let prev = snap(
+            t0,
+            vec![
+                mk(
+                    1,
+                    vec![
+                        zero(Some("A")),
+                        VbdRaw {
+                            dev: 51728,
+                            ..zero(Some("B"))
+                        },
+                    ],
+                ),
+                mk(2, vec![zero(Some("A"))]),
+                mk(3, vec![zero(None)]),
+            ],
+        );
+        let cur = snap(
+            t1,
+            vec![
+                // vm1: 100 reads at 1 ms on A, 10 reads at 5 ms on B.
+                mk(
+                    1,
+                    vec![
+                        on_sr(Some("A"), 100, 100_000),
+                        VbdRaw {
+                            dev: 51728,
+                            ..on_sr(Some("B"), 10, 50_000)
+                        },
+                    ],
+                ),
+                // vm2: 300 reads at 3 ms on A: the top VM there.
+                mk(2, vec![on_sr(Some("A"), 300, 900_000)]),
+                // No mapping: not in any SR.
+                mk(3, vec![on_sr(None, 1000, 0)]),
+            ],
+        );
+        let r = compute(&prev, &cur);
+        assert_eq!(r.srs.len(), 2);
+        let a = &r.srs[0];
+        assert_eq!((a.sr.as_str(), a.vbds, a.kind.as_deref()), ("A", 2, Some("nfs")));
+        // 400 reads + 400 writes over 2 s.
+        assert_eq!((a.rd_iops, a.wr_iops), (200.0, 200.0));
+        assert_eq!(a.rd_bps, 400.0 * 8.0 * 512.0 / 2.0);
+        // Weighted by requests: (100 ms + 900 ms) / 400 = 2.5 ms, not the
+        // 2 ms mean of the two VBD averages.
+        assert_eq!(a.rd_lat_us, Some(2500.0));
+        assert_eq!(a.wr_lat_us, Some(5000.0));
+        assert_eq!(
+            (a.top_id, a.top_name.as_deref(), a.top_iops),
+            (Some(2), Some("vm2"), 300.0)
+        );
+        let b = &r.srs[1];
+        assert_eq!((b.sr.as_str(), b.vbds, b.top_id), ("B", 1, Some(1)));
+        assert_eq!(b.rd_lat_us, Some(5000.0));
+        assert_eq!(r.domains[0].vbds[1].backing.sr.as_deref(), Some("B"));
     }
 
     #[test]
@@ -555,6 +784,7 @@ mod overflow_tests {
                 wr_usecs: u64::MAX,
                 io_errors: u64::MAX,
             }),
+            backing: None,
         };
         let net = NetRaw {
             id: 0,
@@ -573,7 +803,9 @@ mod overflow_tests {
             cur_mem: u64::MAX,
             max_mem: u64::MAX,
             nets: vec![net, net],
-            vbds: vec![vbd, vbd],
+            vbds: vec![vbd.clone(), vbd],
+            vm_uuid: None,
+            mem_target: None,
         };
         let s = Snapshot {
             at: now,
