@@ -45,11 +45,26 @@ impl DomState {
     }
 }
 
+/// libxenstat's individual domain state flags, for `DomainRaw::flags`.
+pub mod flag {
+    pub const DYING: u8 = 1 << 0;
+    pub const SHUTDOWN: u8 = 1 << 1;
+    pub const BLOCKED: u8 = 1 << 2;
+    pub const CRASHED: u8 = 1 << 3;
+    pub const PAUSED: u8 = 1 << 4;
+    pub const RUNNING: u8 = 1 << 5;
+}
+
 #[derive(Clone, Debug)]
 pub struct DomainRaw {
     pub id: u32,
     pub name: String,
     pub state: DomState,
+    /// Raw state flags (`flag::*`); several can be set at once, e.g. paused
+    /// and blocked. `state` is the summary used everywhere else.
+    pub flags: u8,
+    /// XSM security id; 0 without XSM.
+    pub ssid: u32,
     pub cpu_ns: u64,
     pub vcpus: Vec<VcpuRaw>,
     pub cur_mem: u64,
@@ -601,6 +616,8 @@ mod rate_tests {
             id,
             name: name.into(),
             state: DomState::Running,
+            flags: flag::RUNNING,
+            ssid: 0,
             cpu_ns,
             vcpus: vec![VcpuRaw {
                 online: true,
@@ -798,6 +815,8 @@ mod overflow_tests {
             id: 3,
             name: "x".into(),
             state: DomState::Running,
+            flags: flag::RUNNING,
+            ssid: 0,
             cpu_ns: u64::MAX,
             vcpus: vec![],
             cur_mem: u64::MAX,

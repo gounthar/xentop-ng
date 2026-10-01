@@ -45,6 +45,10 @@ struct Api {
     domain_shutdown: unsafe extern "C" fn(P) -> c_uint,
     domain_paused: unsafe extern "C" fn(P) -> c_uint,
     domain_running: unsafe extern "C" fn(P) -> c_uint,
+    // Only for the xentop-compatible output; present in every libxenstat
+    // but not needed for anything else, so not required.
+    domain_blocked: Option<unsafe extern "C" fn(P) -> c_uint>,
+    domain_ssid: Option<unsafe extern "C" fn(P) -> c_uint>,
     domain_num_networks: unsafe extern "C" fn(P) -> c_uint,
     domain_network: unsafe extern "C" fn(P, c_uint) -> P,
     domain_num_vbds: unsafe extern "C" fn(P) -> c_uint,
@@ -189,6 +193,8 @@ impl XenstatSource {
             domain_shutdown: req!("xenstat_domain_shutdown"),
             domain_paused: req!("xenstat_domain_paused"),
             domain_running: req!("xenstat_domain_running"),
+            domain_blocked: opt!("xenstat_domain_blocked"),
+            domain_ssid: opt!("xenstat_domain_ssid"),
             domain_num_networks: req!("xenstat_domain_num_networks"),
             domain_network: req!("xenstat_domain_network"),
             domain_num_vbds: req!("xenstat_domain_num_vbds"),
@@ -309,6 +315,13 @@ impl Source for XenstatSource {
                 if dp.is_null() {
                     continue;
                 }
+                let bit = |f: unsafe extern "C" fn(P) -> c_uint, b: u8| if f(dp) != 0 { b } else { 0 };
+                let flags = bit(a.domain_dying, flag::DYING)
+                    | bit(a.domain_shutdown, flag::SHUTDOWN)
+                    | a.domain_blocked.map_or(0, |f| bit(f, flag::BLOCKED))
+                    | bit(a.domain_crashed, flag::CRASHED)
+                    | bit(a.domain_paused, flag::PAUSED)
+                    | bit(a.domain_running, flag::RUNNING);
                 let state = if (a.domain_crashed)(dp) != 0 {
                     DomState::Crashed
                 } else if (a.domain_dying)(dp) != 0 {
@@ -384,6 +397,8 @@ impl Source for XenstatSource {
                     id: (a.domain_id)(dp),
                     name: cstr((a.domain_name)(dp)),
                     state,
+                    flags,
+                    ssid: a.domain_ssid.map(|f| f(dp)).unwrap_or(0),
                     cpu_ns: (a.domain_cpu_ns)(dp),
                     vcpus,
                     cur_mem: (a.domain_cur_mem)(dp),

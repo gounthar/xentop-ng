@@ -880,6 +880,14 @@ impl DemoSource {
                     } else {
                         DomState::Blocked
                     },
+                    flags: if d.paused {
+                        flag::PAUSED | flag::BLOCKED
+                    } else if d.vcpu_util.iter().any(|&u| u > 0.5) {
+                        flag::RUNNING
+                    } else {
+                        flag::BLOCKED
+                    },
+                    ssid: 0,
                     cpu_ns: d.vcpus.iter().map(|v| v.ns).sum(),
                     vcpus: d.vcpus.clone(),
                     cur_mem: d.mem,

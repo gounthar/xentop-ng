@@ -65,6 +65,10 @@ cat > "$PREFIX/bin/.xtop.new" <<EOF
 # xentop-ng launcher: use the patched libxenstat from $PREFIX/lib
 LD_LIBRARY_PATH=$PREFIX/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}
 export LD_LIBRARY_PATH
+# Started through a link named xentop: take xentop's options and output.
+case "\${0##*/}" in
+    xentop) exec $PREFIX/bin/xentop-ng --xentop "\$@" ;;
+esac
 exec $PREFIX/bin/xentop-ng "\$@"
 EOF
 chmod 0755 "$PREFIX/bin/.xtop.new"

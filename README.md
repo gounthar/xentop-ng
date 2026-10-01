@@ -218,6 +218,81 @@ handy next to a benchmark run. Domains carry `vm_uuid` and `mem_target`
 (bytes), VBDs `sr`, `vdi`, `sr_kind` and `path`, and `srs` holds the per-SR
 totals (full UUIDs, latency, top VM by IOPS). Unknown values are `null`.
 
+For xentop's text format instead, see
+[Drop-in replacement for xentop](#drop-in-replacement-for-xentop).
+
+## Drop-in replacement for xentop
+
+xentop-ng also speaks `xentop`'s command line. Scripts that parse
+`xentop -b` get the same text, in the same format:
+
+```sh
+xentop-ng --xentop -b -i 2 -d 1          # explicit; xentop's options follow --xentop
+/opt/xentop-ng/bin/xtop --xentop -b -i 1 # same, through the XCP-ng launcher
+```
+
+It also switches to xentop mode, busybox style, when it is started under
+the name `xentop`, either directly or through the `xtop` launcher. To make
+plain `xentop` run xentop-ng, put a link **earlier in `PATH`** than the
+system binary. Never overwrite `/usr/sbin/xentop`.
+
+```sh
+ln -s /opt/xentop-ng/bin/xtop /usr/local/sbin/xentop   # or: ./install.sh --xentop-shim
+hash -r                                                # forget the cached path
+rm /usr/local/sbin/xentop                              # undo
+```
+
+On XCP-ng, root's login shells search `/usr/local/sbin` before `/usr/sbin`.
+Cron jobs and services usually have a shorter `PATH`, so they keep running
+the system xentop.
+
+| xentop option | `-b` (batch) | interactive |
+|---|---|---|
+| `-b`, `--batch` | xentop's text output | |
+| `-d`, `--delay=SECONDS` | seconds between samples (default 3) | refresh interval |
+| `-i`, `--iterations=N` | stop after N samples | ignored |
+| `-n`, `--networks` | `Net<n> RX: … TX: …` lines | ignored (details view) |
+| `-x`, `--vbds` | `VBD <type> <dev> …` lines | ignored (details view) |
+| `-v`, `--vcpus` | `VCPUs(sec): …` lines | ignored (details view) |
+| `-r`, `--repeat-header` | header before each domain | ignored |
+| `-f`, `--full-name` | untruncated NAME column | ignored |
+| `-z`, `--dom0-first` | Domain-0 first, rest sorted by name | pins Domain-0 |
+| `-p`, `--pcpus` | physical CPU usage table | ignored (always shown) |
+| `-h`, `-V` | xentop's help and version text | |
+
+Options are parsed the way xentop parses them: clustered short options
+(`-bi2`), `--long=value`, unambiguous prefixes (`--vb`), `atoi()` numbers
+(`-d 0.5` means 0), stray arguments ignored. Errors print the usage and exit
+0, as xentop does. In batch mode SIGINT/SIGTERM end the run after the current
+sample, and a closed pipe ends it silently. Without `-b`, the xentop-ng UI
+starts.
+
+The batch format is checked byte for byte in `cargo test`, against the
+output of the real `xentop.c`. That source is compiled against a stub
+libxenstat that replays the same fixtures (`tests/xentop/harness/`). The
+tests also check a capture from a stock XCP-ng 8.3 host. The format
+covers column widths that grow with large counters, name sorting, `-f`
+widths that persist between samples, `no limit`/`n/a`, VBDs in error
+(`-`), `VCPUs(sec)` wrapping and the `-p` table.
+
+Known differences:
+
+- **Network columns are filled in on Open vSwitch hosts.** The stock
+  libxenstat loses every VIF there, so xentop prints `NETS 0`. xentop-ng
+  fills them in from `/proc/net/dev`, as in its own views.
+- **VM names are sanitised.** Control and bidi characters become `?`, and
+  the 10-byte NAME truncation never cuts a UTF-8 character in half.
+- **CPU(%) is 0.0 when a counter goes backwards** (a reused domain ID) or
+  no time has passed. xentop prints a wrapped-around huge number, `inf` or
+  `nan`.
+- **`-p` labels cores by CPU id.** Offline CPUs are left out and there is no
+  128-CPU limit. If no pCPU data is available, it prints
+  `No PCPU data available` instead of exiting.
+- **qdisk VBDs are labelled `Qdisk`.** xentop has no name for them.
+- **`-p`, `-z` and the `--help` text follow upstream xentop (Xen 4.21).**
+  XCP-ng 8.3's xentop 4.17 rejects `-p` and `-z`, and its help text differs
+  in whitespace.
+
 ## Layout
 
 ```
@@ -229,11 +304,13 @@ src/
   model.rs            raw counters → per-interval rates
   history.rs          ring buffers behind the graphs
   ui/                 layout, boxes, braille graphs, meters, heatmap
+  xentop_compat.rs    xentop command line and `xentop -b` output
 libxenstat/           libxenstat patches: XCP-ng 4.17 and upstream versions
 build/                container builds for XCP-ng and deploy script
 dist/                 release packaging and the XCP-ng installer
 .github/workflows/    CI (fmt, clippy, tests, MSRV, cargo-deny, shellcheck) and releases
 docs/                 screenshots and the tools that generate them
+tests/xentop/         xentop fixtures, golden outputs and the harness that makes them
 ```
 
 Screenshots and the animated tour are generated from the demo, so they can
