@@ -49,6 +49,8 @@ OPTIONS:
                           $XDG_CONFIG_HOME/xentop-ng/config.toml or
                           ~/.config/xentop-ng/config.toml)
         --no-config       don't read or write the preferences file
+        --no-xapi         on XCP-ng/XenServer, don't ask xapi for SR, disk
+                          and network names (show UUIDs only)
     -b, --batch           print one JSON object per interval instead of the UI
     -n, --iterations N    stop after N samples (batch mode)
     -h, --help            this help
@@ -70,6 +72,7 @@ struct Opts {
     domains_only: bool,
     config: Option<PathBuf>,
     no_config: bool,
+    no_xapi: bool,
     batch: bool,
     iterations: Option<u64>,
     dom0_first: bool,
@@ -102,6 +105,7 @@ fn parse_args(args: Vec<String>) -> Result<Opts> {
         domains_only: false,
         config: None,
         no_config: false,
+        no_xapi: false,
         batch: false,
         iterations: None,
         dom0_first: false,
@@ -156,6 +160,7 @@ fn parse_args(args: Vec<String>) -> Result<Opts> {
             }
             "--config" => o.config = Some(PathBuf::from(val(&a)?)),
             "--no-config" => o.no_config = true,
+            "--no-xapi" => o.no_xapi = true,
             "--domains-only" => o.domains_only = true,
             "--theme" => {
                 let t = val(&a)?;
@@ -312,7 +317,9 @@ fn main() -> Result<()> {
     let src: Box<dyn Source> = if o.demo {
         Box::new(DemoSource::new(&o.demo_cfg))
     } else {
-        Box::new(XenstatSource::open(o.lib.as_deref())?)
+        // xentop's batch output has no names, so it doesn't need xapi.
+        let names = !o.no_xapi && !xentop.as_ref().is_some_and(|x| x.batch);
+        Box::new(XenstatSource::open(o.lib.as_deref())?.with_xapi(names))
     };
     if let Some(x) = xentop.filter(|x| x.batch) {
         xentop_compat::batch(src, &x)

@@ -3,7 +3,7 @@
 //! latency grows with queueing, steal time grows with pCPU contention, and
 //! short-lived CI domains come and go.
 
-use super::{Avail, DataStatus, Source};
+use super::{Avail, DataStatus, Source, XapiState};
 use crate::model::*;
 use anyhow::Result;
 use std::f64::consts::TAU;
@@ -46,9 +46,9 @@ impl Rng {
 /// Simulated SRs: (name, kind, latency multiplier, IOPS knee). Names are
 /// only for the code; like on a real host without xapi, the UI shows UUIDs.
 const SRS: [(&str, &str, f64, f64); 3] = [
-    ("local-ssd", "ext", 0.5, 120_000.0),
-    ("nfs-vm-store", "nfs", 2.2, 12_000.0),
-    ("iscsi-lvm", "lvm", 1.3, 40_000.0),
+    ("Local SSD", "ext", 0.5, 120_000.0),
+    ("NFS VM store", "nfs", 2.2, 12_000.0),
+    ("iSCSI array", "lvmoiscsi", 1.3, 40_000.0),
 ];
 const SR_SSD: usize = 0;
 const SR_NFS: usize = 1;
@@ -102,6 +102,7 @@ struct SimDisk {
 /// gets slower as the VMs on it push it towards its IOPS knee.
 struct SimSr {
     uuid: String,
+    name: &'static str,
     kind: &'static str,
     lat_mult: f64,
     /// Total IOPS at which the SR's latency has grown by 60%.
@@ -227,8 +228,9 @@ impl DemoSource {
         let mut rng = Rng(seed);
         let srs = SRS
             .iter()
-            .map(|&(_, kind, lat_mult, knee)| SimSr {
+            .map(|&(name, kind, lat_mult, knee)| SimSr {
                 uuid: rng.uuid(),
+                name,
                 kind,
                 lat_mult,
                 // Bigger hosts come with bigger arrays.
@@ -637,6 +639,9 @@ impl DemoSource {
                         sr: Some(self.srs[sr].uuid.clone()),
                         vdi: Some(self.rng.uuid()),
                         sr_kind: Some(self.srs[sr].kind.into()),
+                        // What xapi would add on an XCP-ng host.
+                        sr_name: Some(self.srs[sr].name.into()),
+                        vdi_name: Some(format!("{name} {i}")),
                         path: None,
                     };
                     let kind = if id == 0 { VbdKind::Blkback } else { VbdKind::Vbd3 };
@@ -663,6 +668,7 @@ impl DemoSource {
             nets: (0..nets)
                 .map(|i| NetRaw {
                     id: i,
+                    network: Some(if i == 0 { "VM network" } else { "Storage network" }.into()),
                     ..Default::default()
                 })
                 .collect(),
@@ -856,6 +862,7 @@ impl Source for DemoSource {
             // Simulated xenstore; independent of the libxenstat flavour.
             storage: Avail::Fallback,
             steal: m,
+            xapi: XapiState::Connected,
         }
     }
 

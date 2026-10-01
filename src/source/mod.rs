@@ -1,5 +1,6 @@
 pub mod demo;
 pub mod fallback;
+pub mod xapi;
 pub mod xenstat;
 pub mod xenstore;
 
@@ -20,6 +21,21 @@ pub enum Avail {
     NotApplicable,
 }
 
+/// Whether names come from xapi (XCP-ng/XenServer toolstack).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XapiState {
+    /// No xapi on this host (plain Xen): UUIDs only, as usual.
+    #[default]
+    Absent,
+    /// Turned off with --no-xapi.
+    Disabled,
+    Connecting,
+    Connected,
+    /// xapi is there but unusable, and why.
+    Failed(String),
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct DataStatus {
     pub pcpu: Avail,
@@ -32,6 +48,8 @@ pub struct DataStatus {
     /// patch, not just libxenstat, so it is left out of the header's
     /// partial/fallback marker; the `i` popup still shows it.
     pub steal: Avail,
+    /// SR/VDI/network names. Extra, never a gap: not part of `degraded`.
+    pub xapi: XapiState,
 }
 
 impl DataStatus {

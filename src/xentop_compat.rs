@@ -894,6 +894,7 @@ Report bugs to <xen-devel@lists.xen.org>.
                     let n: Vec<u64> = f.iter().map(|x| num(x)).collect();
                     s.domains.last_mut().unwrap().nets.push(NetRaw {
                         id: n[0] as u32,
+                        network: None,
                         rbytes: n[1],
                         rpackets: n[2],
                         rerrs: n[3],

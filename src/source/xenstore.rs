@@ -325,7 +325,7 @@ fn lvm_names(vg: &str, lv: &str) -> Option<Backing> {
         sr: Some(sr),
         vdi,
         sr_kind: Some("lvm".into()),
-        path: None,
+        ..Default::default()
     })
 }
 
@@ -370,8 +370,8 @@ pub fn parse_params(raw: &str) -> Backing {
             return Backing {
                 sr: Some(sr),
                 vdi,
-                sr_kind: None,
                 path,
+                ..Default::default()
             };
         }
     }
