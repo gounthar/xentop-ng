@@ -6,6 +6,9 @@
 #  2. Inside the XCP-ng 8.3 build container: apply the whole XCP-ng patch
 #     queue in spec order, then libxenstat/xcp-ng-4.17/0*.patch, configure the
 #     tools like the RPM does, and build only the libraries libxenstat needs.
+#     0003 also touches the hypervisor (a new domctl); those files are patched
+#     but not built here: the hypervisor itself has to be rebuilt separately
+#     (see libxenstat/README.md).
 #  3. Copy libxenstat.so.4.17{,.0} and the xenstat-ext-test binary to out/.
 #
 # Environment overrides:
@@ -122,7 +125,9 @@ soname="$(objdump -p "$OUT_DIR/libxenstat.so.4.17.0" | awk '/SONAME/ {print $2}'
 
 for sym in xenstat_vbd_has_ext xenstat_vbd_rd_reqs_done xenstat_vbd_wr_reqs_done \
            xenstat_vbd_rd_usecs xenstat_vbd_wr_usecs xenstat_vbd_io_errors \
-           xenstat_node_pcpu_idle_ns xenstat_node_num_pcpu_idle; do
+           xenstat_node_pcpu_idle_ns xenstat_node_num_pcpu_idle \
+           xenstat_vcpu_has_runstate xenstat_vcpu_runnable_ns \
+           xenstat_vcpu_blocked_ns xenstat_vcpu_offline_ns; do
     objdump -T "$OUT_DIR/libxenstat.so.4.17.0" | grep -qw "$sym" ||
         { echo "error: $sym not exported" >&2; exit 1; }
 done

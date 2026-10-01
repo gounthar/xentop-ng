@@ -2,8 +2,10 @@
  * xenstat-ext-test: sanity check for the xentop-ng libxenstat extensions.
  *
  * Takes two libxenstat samples 1 s apart and prints, for every domain/VBD,
- * the extended VBD3 counters (plus per-second deltas and mean latency), and
- * for every pCPU the cumulative idle time and derived busy percentage.
+ * the extended VBD3 counters (plus per-second deltas and mean latency), for
+ * every pCPU the cumulative idle time and derived busy percentage, and for
+ * every vCPU its runstate times (running/runnable/blocked/offline) when the
+ * hypervisor provides them (XEN_DOMCTL_get_vcpu_runstate, patch 0003).
  *
  * Run as root in dom0:  LD_LIBRARY_PATH=/opt/xentop-ng/lib ./xenstat-ext-test
  * (built with RUNPATH=/opt/xentop-ng/lib, so LD_LIBRARY_PATH is optional).
@@ -149,6 +151,33 @@ int main(void)
                        dwr / dt,
                        avg_ms(xenstat_vbd_wr_usecs(v) - xenstat_vbd_wr_usecs(p), dwr));
             }
+        }
+    }
+
+    printf("\n== vCPU runstate (%% of interval) ==\n");
+    for (i = 0; i < xenstat_node_num_domains(n1); i++) {
+        xenstat_domain *d = xenstat_node_domain_by_index(n1, i);
+        xenstat_domain *pd = xenstat_node_domain(n0, xenstat_domain_id(d));
+
+        for (j = 0; j < xenstat_domain_num_vcpus(d); j++) {
+            xenstat_vcpu *v = xenstat_domain_vcpu(d, j);
+            xenstat_vcpu *p = pd ? xenstat_domain_vcpu(pd, j) : NULL;
+
+            if (!xenstat_vcpu_has_runstate(v)) {
+                printf("dom %u vcpu %u: no runstate (hypervisor lacks "
+                       "XEN_DOMCTL_get_vcpu_runstate?)\n",
+                       xenstat_domain_id(d), j);
+                break;
+            }
+            if (!p || !xenstat_vcpu_has_runstate(p))
+                continue;
+#define PCT(f) (100.0 * (double)(f(v) - f(p)) / (dt * 1e9))
+            printf("dom %u vcpu %u: running %5.1f%%  runnable (steal) %5.1f%%"
+                   "  blocked %5.1f%%  offline %5.1f%%\n",
+                   xenstat_domain_id(d), j, PCT(xenstat_vcpu_ns),
+                   PCT(xenstat_vcpu_runnable_ns), PCT(xenstat_vcpu_blocked_ns),
+                   PCT(xenstat_vcpu_offline_ns));
+#undef PCT
         }
     }
 

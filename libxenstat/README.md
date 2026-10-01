@@ -4,13 +4,33 @@ xentop-ng reads everything through libxenstat. These patches add the
 metrics it needs, and fix one existing bug, so the extra data can go
 upstream to Xen and help every libxenstat user, not only this tool.
 
+Most of them only touch libxenstat. The exception is steal time: Xen has
+no way for dom0 to read another domain's vCPU runstate times, so **0003
+adds one to the hypervisor** (and libxenctrl), and 0004 uses it in
+libxenstat.
+
+| Patch | Touches | To get the data |
+|---|---|---|
+| 0001, 0002 | libxenstat | replace libxenstat (no reboot) |
+| 0003 | **hypervisor**, public headers, libxenctrl | rebuild Xen, install it, **reboot** |
+| 0004 | libxenstat | replace libxenstat; per-vCPU steal shows up once the hypervisor has 0003 |
+
 | Directory | Base | Used for |
 |---|---|---|
 | [`xcp-ng-4.17/`](xcp-ng-4.17/) | Xen 4.17.6 + XCP-ng's patch queue (`xen-4.17.6-12.3.xcpng8.3`) | building the drop-in `libxenstat.so.4.17` for XCP-ng 8.3 (`build/build-libxenstat.sh`) |
 | [`upstream/`](upstream/) | xen.git `master` | submission to xen-devel |
 
 Both sets make the same changes. `git apply --check` passes on master for
-`upstream/0001` + `0002`.
+`upstream/0001`…`0004` applied in sequence; the patched hypervisor
+(`make -C xen` with the default x86 config, and again with FLASK enabled)
+and `tools/libs/{ctrl,stat}` build. The 4.17 set applies with `--fuzz=0`
+after XCP-ng's patch queue, and its hypervisor builds with XCP-ng's
+`config-release` (and with FLASK enabled).
+
+`build/build-libxenstat.sh` applies all of `xcp-ng-4.17/0*.patch`: 0003 is
+needed there for the public header, even though only the libraries are
+built. Its hypervisor and libxenctrl changes take effect only once XCP-ng's
+Xen package is rebuilt with it (add it to the patch list in `xen.spec`).
 
 ## Compatibility and fallback
 
@@ -20,7 +40,13 @@ drops in for the stock one: the system `xentop` keeps working against it.
 
 xentop-ng looks up every new symbol at runtime and treats it as optional. With
 a stock library it still runs, and the matching fields show `-`. See the
-table in the [main README](../README.md#what-you-get-with-stock-vs-patched-libxenstat).
+table in the [main README](../README.md#stock-libxenstat-fallbacks-and-our-patches).
+
+The same holds the other way round for 0003/0004: a patched libxenstat on a
+stock hypervisor makes one failing domctl per handle, then stops asking;
+`xenstat_vcpu_has_runstate()` returns 0. The new domctl does not change
+`XEN_DOMCTL_INTERFACE_VERSION`, so stock tools keep working on a patched
+hypervisor.
 
 ## 0001: extended VBD3 stats and per-pCPU idle time
 
@@ -70,9 +96,74 @@ empty.
 
 The fix takes the bridge branch only when a bridge was actually found.
 
+## 0003 and 0004: steal time
+
+Today a vCPU's runstate times (`RUNSTATE_running`, `_runnable`, `_blocked`,
+`_offline`) are visible only to its own domain (`VCPUOP_get_runstate_info`,
+or a registered runstate area). Nothing in domctl, sysctl, hypfs or
+libxenstat gives them to dom0: `XEN_DOMCTL_getvcpuinfo` returns the running
+time and the instantaneous `blocked`/`running` flags only.
+
+**0003, hypervisor** (`xen/common/domctl.c`, `public/domctl.h`, FLASK):
+
+```c
+#define XEN_DOMCTL_get_vcpu_runstate 91
+struct xen_domctl_vcpu_runstate {
+    uint32_t vcpu;                     /* IN */
+    uint32_t state;                    /* OUT: current RUNSTATE_* */
+    uint64_aligned_t state_entry_time; /* OUT: system time, ns */
+    uint64_aligned_t time[4];          /* OUT: ns in each RUNSTATE_* */
+};
+```
+
+It returns `vcpu_runstate_get()` for one vCPU of the target domain, brought
+up to the time of the call. It is handled like `XEN_DOMCTL_getvcpuinfo`
+(read-only scheduler accounting, outside the domctl lock on master) and
+uses the same XSM permission, `domain:getvcpuinfo`. libxenctrl gets a
+wrapper:
+
+```c
+typedef struct xen_domctl_vcpu_runstate xc_vcpu_runstate_t;
+int xc_vcpu_get_runstate(xc_interface *xch, uint32_t domid, uint32_t vcpu,
+                         xc_vcpu_runstate_t *info);
+```
+
+**0004, libxenstat** collects it for every vCPU when `XENSTAT_VCPU` is set:
+
+```c
+/* 1 if the hypervisor provided runstate times for this VCPU, else 0 */
+unsigned int       xenstat_vcpu_has_runstate(xenstat_vcpu *vcpu);
+unsigned long long xenstat_vcpu_runnable_ns(xenstat_vcpu *vcpu); /* steal time */
+unsigned long long xenstat_vcpu_blocked_ns(xenstat_vcpu *vcpu);
+unsigned long long xenstat_vcpu_offline_ns(xenstat_vcpu *vcpu);
+```
+
+Running time stays `xenstat_vcpu_ns()`. The cost is one more hypercall per
+vCPU per sample, next to the existing `xc_vcpu_getinfo()`.
+
+**XCP-ng differences**:
+
+- The 4.17 version of 0004 issues the domctl with `xc_domctl()` instead of
+  `xc_vcpu_get_runstate()`, so the bundled libxenstat still loads against
+  the stock XCP-ng libxenctrl.
+- XCP-ng (and XenServer) already carry `XEN_DOMCTL_get_runstate_info` (98),
+  a whole-domain runstate used by xcp-rrdd. Its `runnable` field is the
+  average over the domain's vCPUs, so it gives per-domain but not per-vCPU
+  steal. xentop-ng uses it as a fallback through libxenctrl's
+  `xc_get_runstate_info_ext()` when 0003 isn't there. 0003 takes the next
+  upstream number (91), unused in 4.17, and leaves 98 alone.
+
+**Not tested on hardware yet**: it compiles, but running it needs a host
+booted on a rebuilt hypervisor.
+
 ## Before submitting upstream
 
 - Add your `Signed-off-by:` (DCO) to each patch.
+- 0003 is a hypervisor change: send it to the scheduler/domctl maintainers
+  with 0004 as its user. Questions reviewers may raise: a batched form (all
+  vCPUs of a domain in one call, via a guest handle) instead of one call
+  per vCPU, and whether to bump `XEN_DOMCTL_INTERFACE_VERSION` in this
+  release cycle (not needed for a new sub-op, but customary for some).
 - Harden the existing `read_attributes_vbd3()`. It is not ours, but sits in
   the same path: it opens `/dev/shm/td3-<pid>/vbd-*` with plain `fopen()`.
   Use `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, then `fstat()` for a root-owned
