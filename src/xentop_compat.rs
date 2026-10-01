@@ -874,6 +874,8 @@ Report bugs to <xen-devel@lists.xen.org>.
                         state: DomState::Blocked,
                         flags,
                         ssid: num(f[5]) as u32,
+                        vm_uuid: None,
+                        mem_target: None,
                         cpu_ns: num(f[2]),
                         vcpus: vec![],
                         cur_mem: num(f[3]),
@@ -912,6 +914,7 @@ Report bugs to <xen-devel@lists.xen.org>.
                         wr_sects: n[7],
                         error: n[2] != 0,
                         ext: None,
+                        backing: None,
                     });
                 }
                 k => panic!("fixture: unknown record {k}"),
