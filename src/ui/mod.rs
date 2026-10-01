@@ -789,8 +789,10 @@ fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         .zip(app.hist.wlat.tail(sw as usize * 2))
         .map(|(a, b)| a.max(b))
         .collect();
-    let lat_h = inner.height.saturating_sub(4).min(4);
-    if lat_h > 0 && y + lat_h <= bottom {
+    // The graph takes all rows left under the figures, however tall the
+    // box grew.
+    let lat_h = bottom.saturating_sub(y);
+    if lat_h > 0 {
         let mx = lat_hist.iter().copied().fold(0.0, f64::max);
         let paint = |us: f64| lat_color(th, Some(us));
         area_graph(
