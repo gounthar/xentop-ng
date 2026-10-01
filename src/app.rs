@@ -67,6 +67,8 @@ pub struct App {
     pub status: DataStatus,
     pub theme: usize,
     pub show: [bool; 4],
+    /// Box layout to restore when leaving domains-only mode (`5`).
+    saved_show: Option<[bool; 4]>,
     pub error: Option<String>,
     pub quit: bool,
     /// Where the domain rows were drawn last frame, for mouse hit-testing.
@@ -100,6 +102,7 @@ impl App {
             status: DataStatus::default(),
             theme,
             show: [true; 4],
+            saved_show: None,
             error: None,
             quit: false,
             table_rows: Rect::default(),
@@ -279,8 +282,21 @@ impl App {
             KeyCode::Char(c @ '1'..='4') => {
                 let i = c as usize - '1' as usize;
                 self.show[i] = !self.show[i];
+                self.saved_show = None;
             }
+            KeyCode::Char('5') => self.toggle_domains_only(),
             _ => {}
+        }
+    }
+
+    /// `5`: hide every box but the domain list, or bring back the layout
+    /// that was there before.
+    pub fn toggle_domains_only(&mut self) {
+        if self.show.iter().any(|&s| s) {
+            self.saved_show = Some(self.show);
+            self.show = [false; 4];
+        } else {
+            self.show = self.saved_show.take().unwrap_or([true; 4]);
         }
     }
 

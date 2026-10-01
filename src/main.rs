@@ -38,6 +38,7 @@ OPTIONS:
         --lib PATH        libxenstat to load (default: search, LD_LIBRARY_PATH first).
                           As root, must be root-owned and not group/world-writable.
         --theme NAME      btop, xcp-ng, dracula, gruvbox
+        --domains-only    start with only the domain list (key 5 toggles)
         --colors MODE     truecolor or 256 (default: truecolor, 256 on the
                           Linux console)
     -b, --batch           print one JSON object per interval instead of the UI
@@ -53,6 +54,7 @@ struct Opts {
     lib: Option<String>,
     theme: usize,
     ansi256: bool,
+    domains_only: bool,
     batch: bool,
     iterations: Option<u64>,
 }
@@ -82,6 +84,7 @@ fn parse_args() -> Result<Opts> {
         theme: 0,
         // The Linux VT has no 24-bit colour; most other terminals do.
         ansi256: std::env::var("TERM").is_ok_and(|t| t == "linux"),
+        domains_only: false,
         batch: false,
         iterations: None,
     };
@@ -126,6 +129,7 @@ fn parse_args() -> Result<Opts> {
                 "truecolor" | "24bit" => o.ansi256 = false,
                 m => bail!("--colors: expected truecolor or 256, got {m}"),
             },
+            "--domains-only" => o.domains_only = true,
             "--theme" => {
                 let t = val(&a)?;
                 o.theme = theme::by_name(&t).with_context(|| format!("unknown theme {t}"))?;
@@ -170,6 +174,9 @@ fn batch(mut src: Box<dyn Source>, o: &Opts) -> Result<()> {
 fn run_ui(src: Box<dyn Source>, o: &Opts) -> Result<()> {
     let mut app = App::new(src, o.delay, o.theme);
     app.ansi256 = o.ansi256;
+    if o.domains_only {
+        app.toggle_domains_only();
+    }
     let history = app.source.warmup(600);
     if history.is_empty() {
         // Two quick samples so the first frame already has rates.

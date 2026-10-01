@@ -167,6 +167,7 @@ Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 | `0` | pin Domain-0 on top |
 | `/` or `f` | filter by name or id |
 | `1` `2` `3` `4` | toggle cpu / mem / net / disk boxes |
+| `5` | domains only; press again to bring the boxes back (`--domains-only` starts that way) |
 | `+` `-` | slower / faster refresh |
 | `p` | pause |
 | `t` `T` | cycle themes |
