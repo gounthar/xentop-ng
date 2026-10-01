@@ -26,7 +26,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where xapi listens in dom0 (current, then older XenServer releases).
 const SOCKETS: [&str; 2] = ["/var/lib/xcp/xapi", "/var/xapi/xapi"];
@@ -214,9 +214,10 @@ struct Worker {
 impl Worker {
     fn run(mut self, rx: mpsc::Receiver<Wants>, bye: mpsc::Sender<()>) {
         let mut wants = Wants::default();
+        let mut refreshed = Instant::now();
         loop {
             let wait = if self.rpc.session.is_some() {
-                REFRESH
+                REFRESH.saturating_sub(refreshed.elapsed())
             } else {
                 RETRY
             };
@@ -225,11 +226,15 @@ impl Worker {
                     // Only the latest matters.
                     wants = rx.try_iter().last().unwrap_or(w);
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    self.done = Wants::default();
-                    self.networks.clear();
-                }
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
+            }
+            // By the clock, not on idle timeouts: on a busy host new wants
+            // keep arriving and renames would never be picked up.
+            if refreshed.elapsed() >= REFRESH {
+                self.done = Wants::default();
+                self.networks.clear();
+                refreshed = Instant::now();
             }
             self.round(&wants);
         }
@@ -268,6 +273,12 @@ impl Worker {
     /// Errors returned here mean xapi itself is unusable; a UUID xapi
     /// doesn't know is just left unnamed.
     fn lookup(&mut self, wants: &Wants) -> Result<(), String> {
+        // Even with nothing to look up, so the state says whether xapi
+        // works (a host with no guests yet, or after a failure).
+        self.rpc.login().map_err(|e| match e {
+            Error::Down(s) => s,
+            Error::Api(v) => v.join(" "),
+        })?;
         let srs: Vec<String> = wants
             .srs
             .iter()
@@ -800,6 +811,24 @@ mod tests {
             1
         );
         assert_eq!(calls.last().map(String::as_str), Some("session.logout"));
+    }
+
+    /// Nothing to name (no guests yet): still connected, not "connecting".
+    #[test]
+    fn connected_with_nothing_to_name() {
+        let (path, _) = fake_xapi(|m, _| match m {
+            "session.login_with_password" => Ok(json!("OpaqueRef:session")),
+            _ => Ok(json!("")),
+        });
+        let mut x = Xapi::with_socket(path);
+        let t = Instant::now();
+        while x.state() == XapiState::Connecting && t.elapsed() < Duration::from_secs(5) {
+            let mut s = snapshot();
+            s.domains.clear();
+            x.fill(&mut s);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(x.state(), XapiState::Connected);
     }
 
     #[test]
