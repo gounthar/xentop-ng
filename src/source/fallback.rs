@@ -214,6 +214,7 @@ fn parse_proc_net_dev(s: &str) -> HashMap<(u32, u32), NetRaw> {
             (domid, devid),
             NetRaw {
                 id: devid,
+                network: None,
                 rbytes: f[0],
                 rpackets: f[1],
                 rerrs: f[2],
@@ -379,7 +380,7 @@ vifbogus: 1 2 3 4 0 0 0 0 5 6 7 8 0 0 0 0
 ";
         let m = parse_proc_net_dev(s);
         assert_eq!(m.len(), 2);
-        let v = m[&(15, 0)];
+        let v = &m[&(15, 0)];
         assert_eq!(
             (v.rbytes, v.rpackets, v.rerrs, v.rdrop),
             (142505491, 995684, 1, 2)

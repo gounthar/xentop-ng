@@ -7,8 +7,9 @@
 //! columns simply show "-".
 
 use super::fallback::{self, Vbd3Index, XcCpuInfo, XcDomRunstate};
+use super::xapi::Xapi;
 use super::xenstore::StorageMap;
-use super::{Avail, DataStatus, Source};
+use super::{Avail, DataStatus, Source, XapiState};
 use crate::model::*;
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::Library;
@@ -109,6 +110,8 @@ pub struct XenstatSource {
     xc: Option<XcCpuInfo>,
     /// VM UUIDs, balloon targets and VBD -> SR/VDI, from xenstore.
     storage: StorageMap,
+    /// SR/VDI/network names, on hosts running xapi.
+    xapi: Option<Xapi>,
     /// Domain steal-time fallback, opened the first time it is needed
     /// (outer None: not tried yet).
     xc_runstate: Option<Option<XcDomRunstate>>,
@@ -262,6 +265,7 @@ impl XenstatSource {
             hostname,
             xc,
             storage: StorageMap::open(),
+            xapi: None,
             xc_runstate: None,
             status: DataStatus::default(),
             _lib: lib,
@@ -376,6 +380,7 @@ impl Source for XenstatSource {
                         let x = (a.domain_network)(dp, j);
                         (!x.is_null()).then(|| NetRaw {
                             id: (a.network_id)(x),
+                            network: None,
                             rbytes: (a.network_rbytes)(x),
                             rpackets: (a.network_rpackets)(x),
                             rerrs: (a.network_rerrs)(x),
@@ -452,6 +457,10 @@ impl Source for XenstatSource {
         let mut snap = snap;
         self.fill_gaps(&mut snap);
         self.status.storage = self.storage.fill(&mut snap);
+        if let Some(x) = &mut self.xapi {
+            x.fill(&mut snap);
+            self.status.xapi = x.state();
+        }
         Ok(snap)
     }
 
@@ -465,6 +474,18 @@ impl Source for XenstatSource {
 }
 
 impl XenstatSource {
+    /// Name SRs, VDIs and networks through xapi when this host runs it.
+    /// Off (`--no-xapi`), or on plain Xen, only UUIDs are shown.
+    pub fn with_xapi(mut self, on: bool) -> Self {
+        self.xapi = if on { Xapi::open() } else { None };
+        self.status.xapi = match (on, &self.xapi) {
+            (false, _) => XapiState::Disabled,
+            (true, None) => XapiState::Absent,
+            (true, Some(x)) => x.state(),
+        };
+        self
+    }
+
     /// Patch over what this libxenstat lacks, and record where each class of
     /// metrics came from.
     fn fill_gaps(&mut self, snap: &mut Snapshot) {
@@ -487,7 +508,7 @@ impl XenstatSource {
                 let mut nets: Vec<NetRaw> = vifs
                     .iter()
                     .filter(|((domid, _), _)| *domid == d.id)
-                    .map(|(_, n)| *n)
+                    .map(|(_, n)| n.clone())
                     .collect();
                 if !nets.is_empty() {
                     nets.sort_by_key(|n| n.id);

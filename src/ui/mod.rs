@@ -967,21 +967,26 @@ enum SrCol {
     Write,
     RLat,
     WLat,
+    Trend,
     Top,
 }
 
-/// SR table columns that fit `width`, the top-VM column taking what's left.
-fn sr_cols(width: usize) -> Vec<(SrCol, usize)> {
+/// SR table columns that fit `width`, the trend and top-VM columns taking
+/// what's left.
+/// `sr_w` and `kind_w` are what the SR names and types would like.
+fn sr_cols(width: usize, sr_w: usize, kind_w: usize) -> Vec<(SrCol, usize)> {
+    let sr_w = sr_w.clamp(8, 20);
     // (column, width, priority: lower = kept longer)
     let all = [
-        (SrCol::Sr, 8, 0),
-        (SrCol::Kind, 4, 4),
+        (SrCol::Sr, sr_w, 0),
+        (SrCol::Kind, kind_w.clamp(4, 9), 4),
         (SrCol::Vbds, 4, 5),
         (SrCol::Iops, 6, 0),
         (SrCol::Read, 7, 3),
         (SrCol::Write, 7, 3),
         (SrCol::RLat, 7, 2),
         (SrCol::WLat, 7, 0),
+        (SrCol::Trend, 10, 1),
         (SrCol::Top, 10, 1),
     ];
     for max_prio in (0..=5).rev() {
@@ -992,13 +997,31 @@ fn sr_cols(width: usize) -> Vec<(SrCol, usize)> {
             .collect();
         let used: usize = cols.iter().map(|c| c.1 + 1).sum();
         if used <= width || max_prio == 0 {
-            if let Some(c) = cols.iter_mut().find(|c| c.0 == SrCol::Top) {
-                c.1 += width.saturating_sub(used).min(24);
+            let mut spare = width.saturating_sub(used);
+            // VM names readable first, then a longer trend, then the rest.
+            for (col, max) in [(SrCol::Top, 8), (SrCol::Trend, 20), (SrCol::Top, 16)] {
+                if let Some(c) = cols.iter_mut().find(|c| c.0 == col) {
+                    let add = spare.min(max);
+                    c.1 += add;
+                    spare -= add;
+                }
+            }
+            // Still too wide: long SR names give way first.
+            if let Some(c) = cols.iter_mut().find(|c| c.0 == SrCol::Sr) {
+                c.1 = c.1.saturating_sub(used.saturating_sub(width)).max(8);
             }
             return cols;
         }
     }
     Vec::new()
+}
+
+/// An SR by its name when xapi gave one, else by `short_sr`.
+fn sr_label(name: Option<&str>, key: &str, w: usize) -> String {
+    match name {
+        Some(n) => fmt::trunc(n, w),
+        None => short_sr(key, w),
+    }
 }
 
 /// SR UUIDs are shown by their first block, like `xe` users abbreviate
@@ -1044,7 +1067,18 @@ fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         put(buf, area.x, area.y, area.width, &Line::from(dim(th, msg)));
         return;
     }
-    let cols = sr_cols(area.width as usize);
+    let sr_w = srs
+        .iter()
+        .map(|s| s.name.as_deref().map_or(8, fmt::width))
+        .max()
+        .unwrap_or(8);
+    let kind_w = srs
+        .iter()
+        .filter_map(|s| s.kind.as_deref())
+        .map(fmt::width)
+        .max()
+        .unwrap_or(4);
+    let cols = sr_cols(area.width as usize, sr_w, kind_w);
     let mut x = area.x;
     for (c, w) in &cols {
         let (t, right) = match c {
@@ -1056,6 +1090,7 @@ fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             SrCol::Write => ("WRITE", true),
             SrCol::RLat => ("R LAT", true),
             SrCol::WLat => ("W LAT", true),
+            SrCol::Trend => ("IOPS TREND", false),
             SrCol::Top => ("TOP VM", false),
         };
         let style = Style::new().fg(th.dim).add_modifier(Modifier::BOLD);
@@ -1063,14 +1098,18 @@ fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         x += *w as u16 + 1;
     }
     let rows = area.height as usize - 1;
-    for (i, s) in srs.iter().take(rows).enumerate() {
+    let hist = &app.hist;
+    for (i, s) in in_order(srs, &hist.sr_order, |s| s.sr.clone())
+        .take(rows)
+        .enumerate()
+    {
         let mut sp: Vec<Span> = Vec::new();
         for (c, w) in &cols {
             let w = *w;
             let num = |v: String, c: Color| Span::styled(fmt::pad(&v, w, true), Style::new().fg(c));
             match c {
                 SrCol::Sr => sp.push(Span::styled(
-                    fmt::pad(&short_sr(&s.sr, w), w, false),
+                    fmt::pad(&sr_label(s.name.as_deref(), &s.sr, w), w, false),
                     Style::new().fg(th.fg).add_modifier(Modifier::BOLD),
                 )),
                 SrCol::Kind => sp.push(dim(th, fmt::pad(s.kind.as_deref().unwrap_or("-"), w, false))),
@@ -1083,6 +1122,7 @@ fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
                 SrCol::Write => sp.push(num(fmt::rate(s.wr_bps), th.wr.at(1.0))),
                 SrCol::RLat => sp.push(num(fmt::lat(s.rd_lat_us), lat_color(th, s.rd_lat_us))),
                 SrCol::WLat => sp.push(num(fmt::lat(s.wr_lat_us), lat_color(th, s.wr_lat_us))),
+                SrCol::Trend => sp.extend(io_trend(th, hist.srs.get(&s.sr), w)),
                 SrCol::Top => match s.top_id.filter(|_| s.top_iops >= 0.5) {
                     // Share of the SR's IOPS, when there is room for it.
                     Some(id) => {
@@ -1120,14 +1160,18 @@ fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         )),
     );
     y += 1;
-    let mut vbds: Vec<(&DomRates, &crate::model::VbdRates)> = r
+    // Ranked and filtered on smoothed IOPS, so disks neither trade places
+    // nor blink in and out on every sample.
+    let vbds: Vec<(&DomRates, &crate::model::VbdRates)> = r
         .domains
         .iter()
         .flat_map(|d| d.vbds.iter().map(move |v| (d, v)))
-        .filter(|(_, v)| v.backing.group().is_some() && v.rd_iops + v.wr_iops >= 0.5)
+        .filter(|(d, v)| {
+            v.backing.group().is_some() && hist.vbds.get(&(d.id, v.dev)).is_some_and(|h| h.smooth >= 0.5)
+        })
         .collect();
-    vbds.sort_by(|a, b| (b.1.rd_iops + b.1.wr_iops).total_cmp(&(a.1.rd_iops + a.1.wr_iops)));
-    for (d, v) in vbds.into_iter().take((bottom - y) as usize) {
+    let vbds = in_order(&vbds, &hist.vbd_order, |(d, v)| (d.id, v.dev));
+    for &(d, v) in vbds.take((bottom - y) as usize) {
         let mut sp: Vec<Span> = Vec::new();
         for (c, w) in &cols {
             let w = *w;
@@ -1135,7 +1179,8 @@ fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             match c {
                 SrCol::Sr => {
                     let key = v.backing.group().unwrap_or_default();
-                    sp.push(dim(th, fmt::pad(&short_sr(&key, w), w, false)));
+                    let label = sr_label(v.backing.sr_name.as_deref(), &key, w);
+                    sp.push(dim(th, fmt::pad(&label, w, false)));
                 }
                 SrCol::Kind => sp.push(Span::styled(fmt::pad(&v.name, w, false), Style::new().fg(th.fg))),
                 SrCol::Vbds => sp.push(Span::raw(" ".repeat(w))),
@@ -1144,6 +1189,7 @@ fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
                 SrCol::Write => sp.push(num(fmt::rate(v.wr_bps), th.wr.at(1.0))),
                 SrCol::RLat => sp.push(num(fmt::lat(v.rd_lat_us), lat_color(th, v.rd_lat_us))),
                 SrCol::WLat => sp.push(num(fmt::lat(v.wr_lat_us), lat_color(th, v.wr_lat_us))),
+                SrCol::Trend => sp.extend(io_trend(th, hist.vbds.get(&(d.id, v.dev)), w)),
                 SrCol::Top => sp.extend(vm_cell(th, d.id, &d.name, None, w)),
             }
             sp.push(Span::raw(" "));
@@ -1151,6 +1197,48 @@ fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         put(buf, area.x, y, area.width, &Line::from(sp));
         y += 1;
     }
+}
+
+/// `items` in the order of `order` (by key), then any it doesn't list.
+fn in_order<'a, T, K: Eq + std::hash::Hash>(
+    items: &'a [T],
+    order: &[K],
+    key: impl Fn(&T) -> K,
+) -> impl Iterator<Item = &'a T> {
+    let mut by_key: std::collections::HashMap<K, &T> = items.iter().map(|t| (key(t), t)).collect();
+    let mut out: Vec<&T> = order.iter().filter_map(|k| by_key.remove(k)).collect();
+    // Not ranked yet: keep their own order.
+    out.extend(items.iter().filter(|t| by_key.contains_key(&key(t))));
+    out.into_iter()
+}
+
+/// IOPS over the last `w` samples, scaled to its own peak; each bar is
+/// coloured by the latency at that moment, so a slow spike stands out.
+fn io_trend(th: &Theme, h: Option<&crate::history::IoHistory>, w: usize) -> Vec<Span<'static>> {
+    const B: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let empty = || Span::styled("▁", Style::new().fg(th.meter_empty));
+    let Some(h) = h else {
+        return (0..w).map(|_| empty()).collect();
+    };
+    let n = h.iops.len().min(w);
+    let skip = h.iops.len() - n;
+    let max = h.iops.iter().skip(skip).copied().fold(0.0, f64::max);
+    let mut sp: Vec<Span<'static>> = (n..w).map(|_| empty()).collect();
+    for (v, lat) in h.iops.iter().zip(&h.lat).skip(skip) {
+        let l = if max >= 0.5 {
+            (v / max * 8.0).round() as usize
+        } else {
+            0
+        };
+        if l == 0 {
+            sp.push(empty());
+        } else {
+            // No latency counters (blkback, qdisk): plain bars.
+            let c = if lat.is_some() { lat_color(th, *lat) } else { th.fg };
+            sp.push(Span::styled(B[l.min(8)].to_string(), Style::new().fg(c)));
+        }
+    }
+    sp
 }
 
 /// "id name", plus a share in % when given and there is room, in `w`
@@ -1394,7 +1482,11 @@ fn backing_line(th: &Theme, b: &Backing, w: usize) -> Line<'static> {
     if b.sr.is_some() || b.vdi.is_some() {
         sp.push(dim(th, "sr "));
         sp.push(Span::styled(
-            b.sr.as_deref().map(|s| short_sr(s, 8)).unwrap_or("?".into()),
+            match (&b.sr_name, &b.sr) {
+                (Some(n), _) => fmt::trunc(n, 24),
+                (None, Some(s)) => short_sr(s, 8),
+                (None, None) => "?".into(),
+            },
             Style::new().fg(th.fg),
         ));
         if let Some(k) = &b.sr_kind {
@@ -1402,7 +1494,13 @@ fn backing_line(th: &Theme, b: &Backing, w: usize) -> Line<'static> {
         }
         if let Some(v) = &b.vdi {
             sp.push(dim(th, "  vdi "));
-            sp.push(Span::styled(v.clone(), Style::new().fg(th.fg)));
+            // The name when xapi has one; the UUID stays, for `xe`.
+            if let Some(n) = &b.vdi_name {
+                sp.push(Span::styled(fmt::trunc(n, 32), Style::new().fg(th.fg)));
+                sp.push(dim(th, format!("  {v}")));
+            } else {
+                sp.push(Span::styled(v.clone(), Style::new().fg(th.fg)));
+            }
         } else if let Some(p) = &b.path {
             sp.push(dim(th, "  "));
             sp.push(Span::styled(
@@ -1614,8 +1712,18 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
         line!(Line::from(dim(th, format!("{:─<w$}", "── network "))));
         line!(Line::from(Span::styled(
             format!(
-                "{:<9}{:>9}{:>9}{:>9}{:>9}{:>8}",
-                "vif", "rx", "tx", "rx pps", "tx pps", "err/drp"
+                "{:<9}{:>9}{:>9}{:>9}{:>9}{:>8}{}",
+                "vif",
+                "rx",
+                "tx",
+                "rx pps",
+                "tx pps",
+                "err/drp",
+                if d.nets.iter().any(|n| n.network.is_some()) {
+                    "  network"
+                } else {
+                    ""
+                }
             ),
             Style::new().fg(th.dim).add_modifier(Modifier::BOLD),
         )));
@@ -1638,6 +1746,10 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
                 Span::styled(
                     format!("{:>8}", format!("{}/{}", n.errs, n.drops)),
                     Style::new().fg(if n.errs + n.drops > 0 { th.warn } else { th.dim }),
+                ),
+                dim(
+                    th,
+                    n.network.as_deref().map(|s| format!("  {s}")).unwrap_or_default()
                 ),
             ]));
         }
@@ -1967,6 +2079,21 @@ fn info_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
             Line::from(vec![
                 Span::styled(format!("{mark} "), Style::new().fg(c)),
                 Span::styled(format!("{:<20}", "SR/VDI, VM UUIDs"), Style::new().fg(th.fg)),
+                Span::styled(how, Style::new().fg(if c == th.ok { th.dim } else { c })),
+            ])
+        },
+        {
+            use crate::source::XapiState;
+            let (mark, c, how) = match &st.xapi {
+                XapiState::Connected => ("✓", th.ok, "xapi".to_string()),
+                XapiState::Connecting => ("◐", th.warn, "xapi: connecting".into()),
+                XapiState::Failed(e) => ("✗", th.bad, format!("xapi: {e}")),
+                XapiState::Disabled => ("·", th.dim, "off (--no-xapi): UUIDs only".into()),
+                XapiState::Absent => ("·", th.dim, "n/a: no xapi (plain Xen), UUIDs only".into()),
+            };
+            Line::from(vec![
+                Span::styled(format!("{mark} "), Style::new().fg(c)),
+                Span::styled(format!("{:<20}", "SR/disk/net names"), Style::new().fg(th.fg)),
                 Span::styled(how, Style::new().fg(if c == th.ok { th.dim } else { c })),
             ])
         },

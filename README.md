@@ -41,6 +41,10 @@ per disk and per network interface.
 - **Storage repositories** (`v`): the disk box switches to per-SR totals
   (IOPS, throughput, read/write latency, the VM doing most of the I/O) and
   the busiest disks. It answers "which SR is slow, and who is hammering it?".
+  Rows are ranked by IOPS averaged over about 10 s, and only swap places
+  on a clear change, so they stay put long enough to read. An IOPS trend
+  per row shows the last samples (one bar each, as many as fit), each bar
+  coloured by its latency.
   On other Xen hosts, disks are grouped by the directory or volume group
   that holds them.
 - **Themes**: `btop`, `xcp-ng`, `dracula`, `gruvbox`, and `colorblind`.
@@ -143,9 +147,18 @@ Storage mapping never comes from libxenstat. xentop-ng reads it from
 xenstore through `libxenstore.so` (also loaded at runtime): each domain's
 `vm` and `memory/target` nodes, and each disk's backend `params`, e.g.
 `/dev/sm/backend/<sr>/<vdi>` on XCP-ng. The SR type (ext, nfs, lvm...) comes
-from where `/dev/sm/phy/<sr>/<vdi>` points and `/proc/mounts`. SR and VDI
-*names* live in xapi only, so the UI shows UUIDs (the first block in
-tables, in full in the details and in `--batch`).
+from where `/dev/sm/phy/<sr>/<vdi>` points and `/proc/mounts`.
+
+Names live in xapi only. On an XCP-ng/XenServer host (xapi's socket
+`/var/lib/xcp/xapi` exists), xentop-ng asks it for SR and VDI name-labels,
+the exact SR type (`lvmoiscsi` rather than `lvm`) and the network each VIF
+is on. These show in the SR view, the domain details and `--batch`
+(`sr_name`, `vdi_name`, `network`). This uses read-only calls over the
+local socket, from a background thread, so a slow or restarting xapi never
+holds up the display. Names are re-read every few minutes to pick up
+renames. On plain Xen there is no xapi and nothing changes: UUIDs (the
+first block in tables, in full in the details) or backing paths.
+`--no-xapi` turns it off.
 
 When per-pCPU load, disk latency or VIFs come from a fallback or are
 missing, the header shows a discreet **◐** marker. Storage mapping and steal
@@ -216,6 +229,8 @@ These build and install user space only. The hypervisor half of steal time
 - **Fallback files:** stats files in world-writable `/dev/shm` are only
   trusted if they and their directory are root-owned, opened without
   following symlinks, and belong to a live tapdisk.
+- **xapi names** (SRs, VDIs, networks) are bounded and sanitised like
+  VM names. Only read-only API calls are made.
 - **xenstore values** (backing paths, VM paths) are length-bounded and
   sanitised like names. UUIDs are validated before they are used to build
   any path, so a crafted value can't point xentop-ng elsewhere.
@@ -319,6 +334,8 @@ Column ids: `id`, `name`, `state`, `vcpu`, `cpu`, `cpu_hist`, `steal`,
   Linux console. `--colors mono`: no colour (as with `NO_COLOR`).
 - `--domains-only`: start with only the domain list.
 - `--config PATH`, `--no-config`: see [Configuration](#configuration).
+- `--no-xapi`: on XCP-ng/XenServer, don't ask xapi for SR, disk and
+  network names; show UUIDs only, as on plain Xen.
 - `--lib PATH`: a specific libxenstat (see [Running on a Xen host](#running-on-a-xen-host)).
 - `--xentop ARGS...`: xentop's command line (see [below](#drop-in-replacement-for-xentop)).
 - `xentop-ng --help` lists everything.
@@ -419,6 +436,7 @@ src/
   source/xenstat.rs   libxenstat binding (dlopen, optional extended symbols)
   source/fallback.rs  collectors for what the loaded libxenstat lacks
   source/xenstore.rs  VM UUIDs, balloon targets, VBD → SR/VDI from xenstore
+  source/xapi.rs      SR/VDI/network names from xapi, when the host runs it
   source/demo.rs      simulated host
   model.rs            raw counters → per-interval rates
   history.rs          ring buffers behind the graphs

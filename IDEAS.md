@@ -85,11 +85,12 @@ something expensive for a few seconds and shows it in place.
 
 - ~~VM UUIDs from xenstore; map VBD → VDI → SR, so latency can be aggregated
   per storage repository.~~ Done: detail panel, `v` SR view, `--batch`.
-  Still missing: SR/VDI **name-labels** (xapi only), and per-SR history
-  graphs.
+  Still missing: per-SR history graphs.
 - **Pool view:** poll several hosts over SSH, or read xcp-rrdd / Xen Orchestra
   data, for a cluster-wide top.
-- Optional read-only xapi mode for richer names: SR types, networks.
+- ~~Optional read-only xapi mode for richer names: SR types, networks.~~
+  Done: SR/VDI name-labels, exact SR types and VIF networks, when xapi is
+  running. More could follow the same way: VM tags, pool/host names.
 
 ## Usability
 

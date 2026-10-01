@@ -91,9 +91,11 @@ pub struct VcpuRaw {
     pub runnable_ns: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NetRaw {
     pub id: u32,
+    /// Name of the network the VIF is on (xapi only).
+    pub network: Option<String>,
     pub rbytes: u64,
     pub rpackets: u64,
     pub rerrs: u64,
@@ -158,8 +160,12 @@ pub struct Backing {
     pub sr: Option<String>,
     /// Virtual disk image UUID.
     pub vdi: Option<String>,
-    /// SR flavour when it can be told without xapi: "ext", "nfs", "lvm"...
+    /// SR flavour: "ext", "nfs", "lvm"... worked out locally, or the SR
+    /// type from xapi when there is one ("lvmoiscsi").
     pub sr_kind: Option<String>,
+    /// SR and VDI name-labels (xapi only).
+    pub sr_name: Option<String>,
+    pub vdi_name: Option<String>,
     /// Backing path when there is no SR (plain blkback/qdisk), or for SR
     /// files that are not VDIs (ISOs).
     pub path: Option<String>,
@@ -298,6 +304,8 @@ pub struct VbdRates {
 pub struct SrRates {
     /// SR UUID, or the backing directory when there is no SR.
     pub sr: String,
+    /// SR name-label (xapi only).
+    pub name: Option<String>,
     pub kind: Option<String>,
     pub vbds: usize,
     pub rd_bps: f64,
@@ -322,6 +330,7 @@ impl SrRates {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct NetRates {
     pub id: u32,
+    pub network: Option<String>,
     pub rx_bps: f64,
     pub tx_bps: f64,
     pub rx_pps: f64,
@@ -510,6 +519,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             let pn = p.and_then(|p| p.nets.iter().find(|x| x.id == n.id));
             let mut nr = NetRates {
                 id: n.id,
+                network: n.network.clone(),
                 errs: n.rerrs.saturating_add(n.terrs),
                 drops: n.rdrop.saturating_add(n.tdrop),
                 ..Default::default()
@@ -577,6 +587,9 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                 a.r.vbds += 1;
                 if a.r.kind.is_none() {
                     a.r.kind = vr.backing.sr_kind.clone();
+                }
+                if a.r.name.is_none() {
+                    a.r.name = vr.backing.sr_name.clone();
                 }
                 a.r.rd_bps += vr.rd_bps;
                 a.r.wr_bps += vr.wr_bps;
@@ -765,7 +778,7 @@ mod rate_tests {
                 sr: Some(s.into()),
                 vdi: None,
                 sr_kind: Some("nfs".into()),
-                path: None,
+                ..Default::default()
             }),
         }
     }
@@ -997,7 +1010,7 @@ mod overflow_tests {
             ],
             cur_mem: u64::MAX,
             max_mem: u64::MAX,
-            nets: vec![net, net],
+            nets: vec![net.clone(), net],
             vbds: vec![vbd.clone(), vbd],
             vm_uuid: None,
             mem_target: None,

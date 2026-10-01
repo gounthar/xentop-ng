@@ -24,14 +24,14 @@ done
 # Generic binary.
 g="xentop-ng-$ver-x86_64-linux-gnu"
 mkdir -p "$rel/$g"
-cp "$out/xentop-ng" "$root/README.md" "$root/LICENSE" "$rel/$g/"
+cp "$out/xentop-ng" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE" "$rel/$g/"
 
 # XCP-ng 8.3 bundle.
 x="xentop-ng-$ver-xcp-ng-8.3"
 mkdir -p "$rel/$x/bin" "$rel/$x/lib"
 cp "$out/xentop-ng" "$out/xenstat-ext-test" "$rel/$x/bin/"
 cp "$out/libxenstat.so.4.17.0" "$rel/$x/lib/"
-cp "$root/dist/install.sh" "$root/README.md" "$root/LICENSE" "$rel/$x/"
+cp "$root/dist/install.sh" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE" "$rel/$x/"
 # libxenstat is LGPL-2.1+: ship the changes and where the rest comes from.
 cp -r "$root/libxenstat" "$rel/$x/libxenstat"
 {
