@@ -876,6 +876,7 @@ Report bugs to <xen-devel@lists.xen.org>.
                         ssid: num(f[5]) as u32,
                         vm_uuid: None,
                         mem_target: None,
+                        runnable_ns: None,
                         cpu_ns: num(f[2]),
                         vcpus: vec![],
                         cur_mem: num(f[3]),
@@ -887,6 +888,7 @@ Report bugs to <xen-devel@lists.xen.org>.
                 "vcpu" => s.domains.last_mut().unwrap().vcpus.push(VcpuRaw {
                     online: f[0] != "0",
                     ns: num(f[1]),
+                    runnable_ns: None,
                 }),
                 "net" => {
                     let n: Vec<u64> = f.iter().map(|x| num(x)).collect();

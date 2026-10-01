@@ -28,6 +28,10 @@ pub struct DataStatus {
     /// VBD -> SR/VDI mapping, VM UUIDs and balloon targets. libxenstat
     /// never has these: `Fallback` means read from xenstore.
     pub storage: Avail,
+    /// Steal time (vCPUs runnable but not running). Needs a hypervisor
+    /// patch, not just libxenstat, so it is left out of the header's
+    /// partial/fallback marker; the `i` popup still shows it.
+    pub steal: Avail,
 }
 
 impl DataStatus {

@@ -1,6 +1,7 @@
 //! A simulated Xen host, so the UI can be developed and demonstrated
 //! anywhere. Loads follow smooth periodic patterns with random bursts, disk
-//! latency grows with queueing, and short-lived CI domains come and go.
+//! latency grows with queueing, steal time grows with pCPU contention, and
+//! short-lived CI domains come and go.
 
 use super::{Avail, DataStatus, Source};
 use crate::model::*;
@@ -618,7 +619,14 @@ impl DemoSource {
             phase,
             burst: 0.0,
             vcpu_util: vec![0.0; vcpus],
-            vcpus: vec![VcpuRaw { online: true, ns: 0 }; vcpus],
+            vcpus: vec![
+                VcpuRaw {
+                    online: true,
+                    ns: 0,
+                    runnable_ns: Some(0),
+                };
+                vcpus
+            ],
             disks: shares
                 .into_iter()
                 .enumerate()
@@ -702,8 +710,10 @@ impl DemoSource {
         let mut pcpu_load = vec![0f64; n];
         let mut sr_iops = vec![0f64; self.srs.len()];
         let rot = (t / 7.0) as usize;
+        // (domain index, vCPU index, home pCPU, demand) for steal time.
+        let mut placed: Vec<(usize, usize, usize, f64)> = Vec::new();
 
-        for d in &mut self.doms {
+        for (di, d) in self.doms.iter_mut().enumerate() {
             if d.paused {
                 d.vcpu_util.iter_mut().for_each(|u| *u = 0.0);
                 continue;
@@ -732,6 +742,7 @@ impl DemoSource {
                 } else {
                     (d.id as usize * 5 + j * 3 + rot) % n
                 };
+                placed.push((di, j, c, *u));
                 let mut rest = *u;
                 for _ in 0..n {
                     let room = 1.0 - pcpu_load[c];
@@ -797,6 +808,21 @@ impl DemoSource {
             sr.iops += (iops - sr.iops) * k;
         }
 
+        // Steal time: a vCPU waits for its pCPU in proportion to how much it
+        // wants to run and how contended that pCPU is (sharply so near
+        // saturation), plus a host-wide term once the pCPUs are
+        // oversubscribed. Dom0 gets scheduling priority and waits less.
+        let demand: f64 = placed.iter().map(|p| p.3).sum();
+        let over = (demand / n.max(1) as f64 - 0.85).max(0.0) * 1.5;
+        for (di, j, c, u) in placed {
+            let l = pcpu_load[c].min(1.0);
+            let k = if self.doms[di].id == 0 { 0.3 } else { 1.0 };
+            let frac = (u * (0.005 + 0.12 * l.powi(4) + over) * k * self.rng.range(0.7, 1.3)).min(1.0 - u);
+            if let Some(r) = self.doms[di].vcpus[j].runnable_ns.as_mut() {
+                *r += (frac.max(0.0) * dt * 1e9) as u64;
+            }
+        }
+
         for (idle, load) in self.pcpu_idle.iter_mut().zip(&pcpu_load) {
             let busy = (load + self.rng.range(0.0, 0.02)).min(1.0);
             *idle += ((1.0 - busy) * dt * 1e9) as u64;
@@ -829,6 +855,7 @@ impl Source for DemoSource {
             vifs: Avail::Lib,
             // Simulated xenstore; independent of the libxenstat flavour.
             storage: Avail::Fallback,
+            steal: m,
         }
     }
 
@@ -889,7 +916,15 @@ impl DemoSource {
                     },
                     ssid: 0,
                     cpu_ns: d.vcpus.iter().map(|v| v.ns).sum(),
-                    vcpus: d.vcpus.clone(),
+                    vcpus: d
+                        .vcpus
+                        .iter()
+                        .map(|v| VcpuRaw {
+                            runnable_ns: if self.stock { None } else { v.runnable_ns },
+                            ..*v
+                        })
+                        .collect(),
+                    runnable_ns: None,
                     cur_mem: d.mem,
                     max_mem: d.max_mem,
                     nets: d.nets.clone(),

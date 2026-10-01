@@ -6,7 +6,7 @@
 //! xentop-ng libxenstat patches are optional: when absent, the matching
 //! columns simply show "-".
 
-use super::fallback::{self, Vbd3Index, XcCpuInfo};
+use super::fallback::{self, Vbd3Index, XcCpuInfo, XcDomRunstate};
 use super::xenstore::StorageMap;
 use super::{Avail, DataStatus, Source};
 use crate::model::*;
@@ -80,6 +80,14 @@ struct Api {
     pcpu_idle_ns: Option<unsafe extern "C" fn(P, c_uint) -> c_ulonglong>,
     /// Slots in the pCPU idle array (max_cpu_id + 1); may exceed num_cpus.
     num_pcpu_idle: Option<unsafe extern "C" fn(P) -> c_uint>,
+    runstate: Option<RunstateApi>,
+}
+
+/// Per-vCPU runstate symbols (libxenstat patch 0004; the data also needs
+/// the hypervisor side, patch 0003).
+struct RunstateApi {
+    vcpu_has_runstate: unsafe extern "C" fn(P) -> c_uint,
+    vcpu_runnable_ns: unsafe extern "C" fn(P) -> c_ulonglong,
 }
 
 /// Symbols from the xentop-ng libxenstat patch.
@@ -101,6 +109,9 @@ pub struct XenstatSource {
     xc: Option<XcCpuInfo>,
     /// VM UUIDs, balloon targets and VBD -> SR/VDI, from xenstore.
     storage: StorageMap,
+    /// Domain steal-time fallback, opened the first time it is needed
+    /// (outer None: not tried yet).
+    xc_runstate: Option<Option<XcDomRunstate>>,
     status: DataStatus,
     // Keeps the function pointers above valid; declared last so it is
     // dropped after `handle` has been released in Drop.
@@ -169,6 +180,13 @@ impl XenstatSource {
             })
         })();
 
+        let runstate = (|| {
+            Some(RunstateApi {
+                vcpu_has_runstate: opt!("xenstat_vcpu_has_runstate")?,
+                vcpu_runnable_ns: opt!("xenstat_vcpu_runnable_ns")?,
+            })
+        })();
+
         let api = Api {
             init: req!("xenstat_init"),
             uninit: req!("xenstat_uninit"),
@@ -221,6 +239,7 @@ impl XenstatSource {
             ext,
             pcpu_idle_ns: opt!("xenstat_node_pcpu_idle_ns"),
             num_pcpu_idle: opt!("xenstat_node_num_pcpu_idle"),
+            runstate,
         };
 
         let handle = unsafe { (api.init)() };
@@ -243,6 +262,7 @@ impl XenstatSource {
             hostname,
             xc,
             storage: StorageMap::open(),
+            xc_runstate: None,
             status: DataStatus::default(),
             _lib: lib,
         })
@@ -342,6 +362,11 @@ impl Source for XenstatSource {
                         (!v.is_null()).then(|| VcpuRaw {
                             online: (a.vcpu_online)(v) != 0,
                             ns: (a.vcpu_ns)(v),
+                            runnable_ns: a
+                                .runstate
+                                .as_ref()
+                                .filter(|r| (r.vcpu_has_runstate)(v) != 0)
+                                .map(|r| (r.vcpu_runnable_ns)(v)),
                         })
                     })
                     .collect();
@@ -407,6 +432,7 @@ impl Source for XenstatSource {
                     vbds,
                     vm_uuid: None,
                     mem_target: None,
+                    runnable_ns: None,
                 });
             }
 
@@ -470,6 +496,27 @@ impl XenstatSource {
                 }
             }
         }
+
+        // Steal time: per vCPU from libxenstat (needs the hypervisor
+        // patch too), else per domain from XCP-ng's own domctl.
+        let per_vcpu = |d: &DomainRaw| !d.vcpus.is_empty() && d.vcpus.iter().all(|v| v.runnable_ns.is_some());
+        self.status.steal = if snap.domains.iter().any(per_vcpu) {
+            Avail::Lib
+        } else {
+            let xc = self.xc_runstate.get_or_insert_with(XcDomRunstate::open);
+            let mut found = false;
+            if let Some(xc) = xc.as_mut() {
+                for d in snap.domains.iter_mut().filter(|d| !per_vcpu(d)) {
+                    d.runnable_ns = xc.runnable_ns(d.id, d.vcpus.len());
+                    found |= d.runnable_ns.is_some();
+                }
+            }
+            if found {
+                Avail::Fallback
+            } else {
+                Avail::Missing
+            }
+        };
 
         // tapdisk3 latency.
         let vbd3 = |snap: &Snapshot| {

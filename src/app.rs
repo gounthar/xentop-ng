@@ -13,17 +13,19 @@ pub enum SortKey {
     Net,
     Disk,
     Lat,
+    Steal,
     Name,
     Id,
 }
 
 impl SortKey {
-    pub const ALL: [SortKey; 7] = [
+    pub const ALL: [SortKey; 8] = [
         SortKey::Cpu,
         SortKey::Mem,
         SortKey::Net,
         SortKey::Disk,
         SortKey::Lat,
+        SortKey::Steal,
         SortKey::Name,
         SortKey::Id,
     ];
@@ -34,6 +36,7 @@ impl SortKey {
             SortKey::Net => "net",
             SortKey::Disk => "disk",
             SortKey::Lat => "latency",
+            SortKey::Steal => "steal",
             SortKey::Name => "name",
             SortKey::Id => "id",
         }
@@ -174,6 +177,10 @@ impl App {
                 SortKey::Net => a.net_bps().total_cmp(&b.net_bps()),
                 SortKey::Disk => a.disk_bps().total_cmp(&b.disk_bps()),
                 SortKey::Lat => a.lat_us().unwrap_or(-1.0).total_cmp(&b.lat_us().unwrap_or(-1.0)),
+                SortKey::Steal => a
+                    .steal_pct
+                    .unwrap_or(-1.0)
+                    .total_cmp(&b.steal_pct.unwrap_or(-1.0)),
                 SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 SortKey::Id => a.id.cmp(&b.id),
             };

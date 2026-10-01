@@ -1,0 +1,197 @@
+From 20b9f4b742af6e54d9f5afa734404e4b17b3bfa2 Mon Sep 17 00:00:00 2001
+From: Olivier Lambert <olivier.lambert@vates.tech>
+Date: Thu, 1 Oct 2026 08:00:57 +0200
+Subject: [PATCH] xen/domctl: add XEN_DOMCTL_get_vcpu_runstate
+
+A vCPU's runstate accounting (time spent running, runnable, blocked and
+offline) is only available to the vCPU's own domain, through
+VCPUOP_get_runstate_info or a registered runstate area.  The toolstack
+can get running time from XEN_DOMCTL_getvcpuinfo, but has no way to see
+how long a vCPU was runnable without being scheduled, i.e. waiting for a
+physical CPU.  That "steal time" is the most direct measure of CPU
+contention on a host, and monitoring tools in dom0 (xentop and friends)
+cannot show it today.
+
+Add XEN_DOMCTL_get_vcpu_runstate, which returns vcpu_runstate_get() for
+one vCPU of the target domain: the current state, when it was entered,
+and the time spent in each RUNSTATE_*, up to the time of the call.  Like
+XEN_DOMCTL_getvcpuinfo it only reads scheduler accounting, so it is
+handled the same way: before the domctl lock is taken, and covered by
+the same XSM permission (domain getvcpuinfo).
+
+Adding a sub-op is a compatible change, so XEN_DOMCTL_INTERFACE_VERSION
+is left alone.  Callers detect older hypervisors by the failure of the
+call (ENOSYS without XSM).
+
+Also add the libxenctrl wrapper xc_vcpu_get_runstate().
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ tools/include/xenctrl.h             | 11 +++++++++++
+ tools/libs/ctrl/xc_domain.c         | 19 +++++++++++++++++++
+ xen/common/domctl.c                 | 25 +++++++++++++++++++++++++
+ xen/include/public/domctl.h         | 20 ++++++++++++++++++++
+ xen/xsm/flask/hooks.c               |  1 +
+ xen/xsm/flask/policy/access_vectors |  1 +
+ 6 files changed, 77 insertions(+)
+
+diff --git a/tools/include/xenctrl.h b/tools/include/xenctrl.h
+index 9f00d4a19d..ae5019c9b9 100644
+--- a/tools/include/xenctrl.h
++++ b/tools/include/xenctrl.h
+@@ -832,6 +832,17 @@ int xc_vcpu_getinfo(xc_interface *xch,
+                     uint32_t vcpu,
+                     xc_vcpuinfo_t *info);
+ 
++/*
++ * Time vCPU @vcpu of @domid has spent in each RUNSTATE_* so far (running,
++ * runnable i.e. waiting for a pCPU, blocked, offline).  Hypervisors without
++ * XEN_DOMCTL_get_vcpu_runstate fail it, usually with errno ENOSYS.
++ */
++typedef struct xen_domctl_vcpu_runstate xc_vcpu_runstate_t;
++int xc_vcpu_get_runstate(xc_interface *xch,
++                         uint32_t domid,
++                         uint32_t vcpu,
++                         xc_vcpu_runstate_t *info);
++
+ long long xc_domain_get_cpu_usage(xc_interface *xch,
+                                   uint32_t domid,
+                                   int vcpu);
+diff --git a/tools/libs/ctrl/xc_domain.c b/tools/libs/ctrl/xc_domain.c
+index 94cfab0fa1..f3c32cb52f 100644
+--- a/tools/libs/ctrl/xc_domain.c
++++ b/tools/libs/ctrl/xc_domain.c
+@@ -1310,6 +1310,25 @@ int xc_vcpu_getinfo(xc_interface *xch,
+     return rc;
+ }
+ 
++int xc_vcpu_get_runstate(xc_interface *xch,
++                         uint32_t domid,
++                         uint32_t vcpu,
++                         xc_vcpu_runstate_t *info)
++{
++    int rc;
++    struct xen_domctl domctl = {
++        .cmd = XEN_DOMCTL_get_vcpu_runstate,
++        .domain = domid,
++        .u.vcpu_runstate.vcpu = vcpu,
++    };
++
++    rc = do_domctl(xch, &domctl);
++    if ( rc == 0 )
++        *info = domctl.u.vcpu_runstate;
++
++    return rc;
++}
++
+ int xc_domain_ioport_permission(xc_interface *xch,
+                                 uint32_t domid,
+                                 uint32_t first_port,
+diff --git a/xen/common/domctl.c b/xen/common/domctl.c
+index 83405a766a..9a60a28367 100644
+--- a/xen/common/domctl.c
++++ b/xen/common/domctl.c
+@@ -577,6 +577,31 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
+         goto domctl_out_unlock_rcuonly;
+     }
+ 
++    case XEN_DOMCTL_get_vcpu_runstate:
++    {
++        const struct vcpu *v = domain_vcpu(d, op->u.vcpu_runstate.vcpu);
++        struct vcpu_runstate_info runstate;
++        unsigned int i;
++
++        if ( !v )
++        {
++            ret = -ENOENT;
++            goto domctl_out_unlock_rcuonly;
++        }
++
++        vcpu_runstate_get(v, &runstate);
++
++        BUILD_BUG_ON(ARRAY_SIZE(op->u.vcpu_runstate.time) !=
++                     ARRAY_SIZE(runstate.time));
++        op->u.vcpu_runstate.state = runstate.state;
++        op->u.vcpu_runstate.state_entry_time = runstate.state_entry_time;
++        for ( i = 0; i < ARRAY_SIZE(runstate.time); i++ )
++            op->u.vcpu_runstate.time[i] = runstate.time[i];
++
++        copyback = true;
++        goto domctl_out_unlock_rcuonly;
++    }
++
+     case XEN_DOMCTL_shadow_op:
+         if ( op->u.shadow_op.op == XEN_DOMCTL_SHADOW_OP_CLEAN ||
+              op->u.shadow_op.op == XEN_DOMCTL_SHADOW_OP_PEEK )
+diff --git a/xen/include/public/domctl.h b/xen/include/public/domctl.h
+index 510300bb67..d414f6ffa3 100644
+--- a/xen/include/public/domctl.h
++++ b/xen/include/public/domctl.h
+@@ -329,6 +329,24 @@ struct xen_domctl_getvcpuinfo {
+     uint32_t cpu;                     /* current mapping   */
+ };
+ 
++/*
++ * XEN_DOMCTL_get_vcpu_runstate
++ *
++ * Runstate accounting of one vCPU of the target domain: the data
++ * VCPUOP_get_runstate_info returns to the vCPU's own domain, brought up to
++ * the time of the call.  Lets a toolstack tell time a vCPU spent waiting for
++ * a physical CPU (RUNSTATE_runnable, i.e. steal time) from time spent idle.
++ */
++struct xen_domctl_vcpu_runstate {
++    /* IN variables. */
++    uint32_t vcpu;
++    /* OUT variables. */
++    uint32_t state;                    /* current RUNSTATE_* */
++    uint64_aligned_t state_entry_time; /* when it was entered (system time, ns) */
++    uint64_aligned_t time[4];          /* ns spent in each RUNSTATE_* */
++};
++typedef struct xen_domctl_vcpu_runstate xen_domctl_vcpu_runstate_t;
++
+ 
+ /* Get/set the NUMA node(s) with which the guest has affinity with. */
+ /* XEN_DOMCTL_setnodeaffinity */
+@@ -1371,6 +1389,7 @@ struct xen_domctl {
+ #define XEN_DOMCTL_gsi_permission                88
+ #define XEN_DOMCTL_set_llc_colors                89
+ #define XEN_DOMCTL_get_domain_state              90 /* stable interface */
++#define XEN_DOMCTL_get_vcpu_runstate             91
+ #define XEN_DOMCTL_gdbsx_guestmemio            1000
+ #define XEN_DOMCTL_gdbsx_pausevcpu             1001
+ #define XEN_DOMCTL_gdbsx_unpausevcpu           1002
+@@ -1439,6 +1458,7 @@ struct xen_domctl {
+ #endif
+         struct xen_domctl_set_llc_colors    set_llc_colors;
+         struct xen_domctl_get_domain_state  get_domain_state;
++        struct xen_domctl_vcpu_runstate     vcpu_runstate;
+         uint8_t                             pad[128];
+     } u;
+ };
+diff --git a/xen/xsm/flask/hooks.c b/xen/xsm/flask/hooks.c
+index d65ba0aeae..5d5e4da529 100644
+--- a/xen/xsm/flask/hooks.c
++++ b/xen/xsm/flask/hooks.c
+@@ -737,6 +737,7 @@ static int cf_check flask_domctl(struct domain *d, struct xen_domctl *op)
+         return current_has_perm(d, SECCLASS_DOMAIN, DOMAIN__GETVCPUCONTEXT);
+ 
+     case XEN_DOMCTL_getvcpuinfo:
++    case XEN_DOMCTL_get_vcpu_runstate:
+         return current_has_perm(d, SECCLASS_DOMAIN, DOMAIN__GETVCPUINFO);
+ 
+     case XEN_DOMCTL_settimeoffset:
+diff --git a/xen/xsm/flask/policy/access_vectors b/xen/xsm/flask/policy/access_vectors
+index bbb9c117ec..f4d7f9fa24 100644
+--- a/xen/xsm/flask/policy/access_vectors
++++ b/xen/xsm/flask/policy/access_vectors
+@@ -139,6 +139,7 @@ class domain
+ # XEN_DOMCTL_getdomaininfo, XEN_SYSCTL_getdomaininfolist
+     getdomaininfo
+ # XEN_DOMCTL_getvcpuinfo
++# XEN_DOMCTL_get_vcpu_runstate
+     getvcpuinfo
+ # XEN_DOMCTL_getvcpucontext
+ # XEN_DOMCTL_get_ext_vcpucontext
+-- 
+2.55.0
+

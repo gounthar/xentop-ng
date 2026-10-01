@@ -1,0 +1,173 @@
+From d1eb60a60269b1d80a8e2e564003553820d69177 Mon Sep 17 00:00:00 2001
+From: Olivier Lambert <olivier.lambert@vates.tech>
+Date: Thu, 1 Oct 2026 08:03:03 +0200
+Subject: [PATCH] tools/libxenstat: expose per-VCPU runstate times
+
+Use XEN_DOMCTL_get_vcpu_runstate, through xc_vcpu_get_runstate(), to
+collect the time each VCPU spent runnable, blocked and offline alongside
+its running time, and add accessors:
+
+ - xenstat_vcpu_has_runstate(): 1 if the times below are valid;
+ - xenstat_vcpu_runnable_ns(): runnable but not running, i.e. waiting
+   for a physical CPU ("steal time");
+ - xenstat_vcpu_blocked_ns() and xenstat_vcpu_offline_ns().
+
+Running time stays available through xenstat_vcpu_ns().
+
+On a hypervisor without the domctl, or when XSM denies it, the first
+call fails and the handle stops asking, so the cost there is a single
+failed hypercall per handle; has_runstate is then 0 and the accessors
+return 0.  Other failures only affect the VCPU concerned.
+
+New fields are appended to the private structures only, so the existing
+ABI is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ tools/include/xenstat.h        | 13 ++++++++
+ tools/libs/stat/xenstat.c      | 58 ++++++++++++++++++++++++++++++++++
+ tools/libs/stat/xenstat_priv.h |  7 ++++
+ 3 files changed, 78 insertions(+)
+
+diff --git a/tools/include/xenstat.h b/tools/include/xenstat.h
+index e197d649c8..0608a549c0 100644
+--- a/tools/include/xenstat.h
++++ b/tools/include/xenstat.h
+@@ -149,6 +149,19 @@ xenstat_vbd *xenstat_domain_vbd(xenstat_domain * domain,
+ unsigned int xenstat_vcpu_online(xenstat_vcpu * vcpu);
+ unsigned long long xenstat_vcpu_ns(xenstat_vcpu * vcpu);
+ 
++/*
++ * Runstate times of the VCPU (XEN_DOMCTL_get_vcpu_runstate): 1 if the
++ * hypervisor provided them for this VCPU, else 0 and the accessors below
++ * return 0.  Cumulative nanoseconds, like xenstat_vcpu_ns() (running time).
++ */
++unsigned int xenstat_vcpu_has_runstate(xenstat_vcpu * vcpu);
++/* Runnable but not running: waiting for a physical CPU ("steal time") */
++unsigned long long xenstat_vcpu_runnable_ns(xenstat_vcpu * vcpu);
++/* Blocked: idle, waiting for an event */
++unsigned long long xenstat_vcpu_blocked_ns(xenstat_vcpu * vcpu);
++/* Offline: down, or paused by the toolstack or hypervisor */
++unsigned long long xenstat_vcpu_offline_ns(xenstat_vcpu * vcpu);
++
+ 
+ /*
+  * Network functions - extract information from a xenstat_network
+diff --git a/tools/libs/stat/xenstat.c b/tools/libs/stat/xenstat.c
+index 60f17fe73f..7b1fe73b5d 100644
+--- a/tools/libs/stat/xenstat.c
++++ b/tools/libs/stat/xenstat.c
+@@ -26,6 +26,7 @@
+ #include <unistd.h>
+ 
+ #include "xenstat_priv.h"
++#include <xen/vcpu.h>
+ 
+ /*
+  * Data-collection types
+@@ -500,6 +501,36 @@ xenstat_vbd *xenstat_domain_vbd(xenstat_domain * domain,
+ /*
+  * VCPU functions
+  */
++/* Collect the runstate times of one VCPU, if the hypervisor provides them */
++static void xenstat_collect_vcpu_runstate(xenstat_handle * handle,
++					  unsigned int domid,
++					  unsigned int vcpu,
++					  xenstat_vcpu * v)
++{
++	xc_vcpu_runstate_t rs;
++
++	v->has_runstate = 0;
++	v->runnable_ns = v->blocked_ns = v->offline_ns = 0;
++	if (handle->no_vcpu_runstate)
++		return;
++
++	if (xc_vcpu_get_runstate(handle->xc_handle, domid, vcpu, &rs) != 0) {
++		/*
++		 * Older hypervisor, or not allowed by XSM: don't ask again.
++		 * Other errors (domain going away) only affect this VCPU.
++		 */
++		if (errno == ENOSYS || errno == EOPNOTSUPP ||
++		    errno == EPERM || errno == EACCES)
++			handle->no_vcpu_runstate = 1;
++		return;
++	}
++
++	v->has_runstate = 1;
++	v->runnable_ns = rs.time[RUNSTATE_runnable];
++	v->blocked_ns = rs.time[RUNSTATE_blocked];
++	v->offline_ns = rs.time[RUNSTATE_offline];
++}
++
+ /* Collect information about VCPUs */
+ static int xenstat_collect_vcpus(xenstat_node * node)
+ {
+@@ -537,6 +568,9 @@ static int xenstat_collect_vcpus(xenstat_node * node)
+ 			else {
+ 				node->domains[i].vcpus[vcpu].online = info.online;
+ 				node->domains[i].vcpus[vcpu].ns = info.cpu_time;
++				xenstat_collect_vcpu_runstate(node->handle,
++					node->domains[i].id, vcpu,
++					&node->domains[i].vcpus[vcpu]);
+ 			}
+ 		}
+ 	}
+@@ -568,6 +602,30 @@ unsigned long long xenstat_vcpu_ns(xenstat_vcpu * vcpu)
+ 	return vcpu->ns;
+ }
+ 
++/* Whether the runstate times below are valid */
++unsigned int xenstat_vcpu_has_runstate(xenstat_vcpu * vcpu)
++{
++	return vcpu->has_runstate;
++}
++
++/* Get time spent runnable but not running (waiting for a pCPU) */
++unsigned long long xenstat_vcpu_runnable_ns(xenstat_vcpu * vcpu)
++{
++	return vcpu->runnable_ns;
++}
++
++/* Get time spent blocked */
++unsigned long long xenstat_vcpu_blocked_ns(xenstat_vcpu * vcpu)
++{
++	return vcpu->blocked_ns;
++}
++
++/* Get time spent offline */
++unsigned long long xenstat_vcpu_offline_ns(xenstat_vcpu * vcpu)
++{
++	return vcpu->offline_ns;
++}
++
+ /*
+  * Network functions
+  */
+diff --git a/tools/libs/stat/xenstat_priv.h b/tools/libs/stat/xenstat_priv.h
+index aeeb6fc881..f41c9d3749 100644
+--- a/tools/libs/stat/xenstat_priv.h
++++ b/tools/libs/stat/xenstat_priv.h
+@@ -38,6 +38,8 @@ struct xenstat_handle {
+ 	int page_size;
+ 	void *priv;
+ 	char xen_version[VERSION_SIZE]; /* xen version running on this node */
++	/* Appended fields: keep existing layout intact */
++	int no_vcpu_runstate; /* hypervisor lacks XEN_DOMCTL_get_vcpu_runstate */
+ };
+ 
+ struct xenstat_node {
+@@ -74,6 +76,11 @@ struct xenstat_domain {
+ struct xenstat_vcpu {
+ 	unsigned int online;
+ 	unsigned long long ns;
++	/* Appended fields: only valid when has_runstate is set */
++	unsigned int has_runstate;
++	unsigned long long runnable_ns;
++	unsigned long long blocked_ns;
++	unsigned long long offline_ns;
+ };
+ 
+ struct xenstat_network {
+-- 
+2.55.0
+
