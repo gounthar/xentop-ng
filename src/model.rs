@@ -427,13 +427,21 @@ pub fn vbd_name(dev: u32) -> String {
         let disk = (dev >> 8) & 0xfffff;
         return format!("xvd{}", letters(disk));
     }
-    match major {
-        202 => format!("xvd{}", letters(minor >> 4)),
-        3 => format!("hd{}", letters(minor >> 6)),
-        22 => format!("hd{}", letters(2 + (minor >> 6))),
-        8 => format!("sd{}", letters(minor >> 4)),
-        _ => format!("{dev}"),
-    }
+    // Name disks the way the guest's PV driver does (Linux xen-blkfront's
+    // xen_translate_vdev(); Windows PV drivers number them the same way),
+    // since that's what shows up in the guest's iostat. HVM disks carry
+    // emulated IDE/SCSI numbers so the BIOS can boot from them: on XCP-ng
+    // the first four are 768/832/5632/5696 (hda..hdd), which the guest
+    // sees as xvda..xvdd.
+    let index = match major {
+        202 => minor >> 4,
+        3 => minor >> 6,
+        22 => 2 + (minor >> 6),
+        8 => minor >> 4,
+        65..=71 => (minor >> 4) + (major - 65 + 1) * 16,
+        _ => return format!("{dev}"),
+    };
+    format!("xvd{}", letters(index))
 }
 
 pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
@@ -642,7 +650,15 @@ mod tests {
         assert_eq!(vbd_name(51712), "xvda");
         assert_eq!(vbd_name(51728), "xvdb");
         assert_eq!(vbd_name(51808), "xvdg");
-        assert_eq!(vbd_name(768), "hda");
+        // Emulated IDE/SCSI numbers, as the guest's PV driver names them.
+        assert_eq!(vbd_name(768), "xvda"); // hda
+        assert_eq!(vbd_name(832), "xvdb"); // hdb
+        assert_eq!(vbd_name(5632), "xvdc"); // hdc
+        assert_eq!(vbd_name(5696), "xvdd"); // hdd
+        assert_eq!(vbd_name(2048), "xvda"); // sda
+        assert_eq!(vbd_name(2064), "xvdb"); // sdb
+        assert_eq!(vbd_name(65 << 8), "xvdq"); // sdq
+        assert_eq!(vbd_name(51776), "xvde");
         assert_eq!(vbd_name((1 << 28) | (27 << 8)), "xvdab");
     }
 }

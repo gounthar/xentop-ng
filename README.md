@@ -154,6 +154,12 @@ on the hypervisor. Press **`i`** for the data sources panel,
 which says where each metric comes from. `--batch` output includes the same
 information under `"sources"`.
 
+Disks are named the way the guest sees them with PV drivers: HVM disks
+carry emulated IDE numbers for the BIOS (768, 832, 5632, 5696, i.e.
+`hda`…`hdd` on the Xen side), which Linux and Windows PV drivers present as
+`xvda`…`xvdd`, so that's what xentop-ng shows. `--batch` keeps the raw Xen
+device number in `dev`, for matching against xenstore or `tap-ctl list`.
+
 Missing values show as `-`, never a made-up number. blkback and qdisk disks
 have no latency counters at all. Without per-pCPU data, host CPU is
 estimated from domain CPU time and labelled `est.`.
