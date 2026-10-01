@@ -6,6 +6,7 @@ mod source;
 mod term;
 mod theme;
 mod ui;
+mod xentop_compat;
 
 use anyhow::{bail, Context, Result};
 use app::App;
@@ -45,6 +46,9 @@ OPTIONS:
     -n, --iterations N    stop after N samples (batch mode)
     -h, --help            this help
     -V, --version         print version
+        --xentop ARGS...  behave like xentop with xentop's options (also
+                          when invoked as `xentop`); `--xentop -b` prints
+                          xentop's batch format
 ";
 
 struct Opts {
@@ -57,6 +61,7 @@ struct Opts {
     domains_only: bool,
     batch: bool,
     iterations: Option<u64>,
+    dom0_first: bool,
 }
 
 /// "512G", "1T", "1TiB", "64g" -> bytes (binary units; bare number = GiB).
@@ -75,7 +80,7 @@ fn parse_size(s: &str) -> Option<u64> {
     (v >= (1u64 << 30) as f64).then_some(v as u64)
 }
 
-fn parse_args() -> Result<Opts> {
+fn parse_args(args: Vec<String>) -> Result<Opts> {
     let mut o = Opts {
         delay: Duration::from_secs(1),
         demo: false,
@@ -87,8 +92,9 @@ fn parse_args() -> Result<Opts> {
         domains_only: false,
         batch: false,
         iterations: None,
+        dom0_first: false,
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(a) = args.next() {
         let mut val = |name: &str| args.next().with_context(|| format!("{name} needs a value"));
         match a.as_str() {
@@ -174,6 +180,7 @@ fn batch(mut src: Box<dyn Source>, o: &Opts) -> Result<()> {
 fn run_ui(src: Box<dyn Source>, o: &Opts) -> Result<()> {
     let mut app = App::new(src, o.delay, o.theme);
     app.ansi256 = o.ansi256;
+    app.dom0_first = o.dom0_first;
     if o.domains_only {
         app.toggle_domains_only();
     }
@@ -216,13 +223,21 @@ fn run_ui(src: Box<dyn Source>, o: &Opts) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let o = parse_args()?;
+    let (args, xentop_args) = xentop_compat::split_args(std::env::args());
+    let mut o = parse_args(args)?;
+    let xentop = xentop_args.map(|(prog, a)| xentop_compat::parse_or_exit(&prog, &a));
+    if let Some(x) = &xentop {
+        o.delay = x.ui_delay().unwrap_or(o.delay);
+        o.dom0_first = x.dom0_first;
+    }
     let src: Box<dyn Source> = if o.demo {
         Box::new(DemoSource::new(&o.demo_cfg))
     } else {
         Box::new(XenstatSource::open(o.lib.as_deref())?)
     };
-    if o.batch {
+    if let Some(x) = xentop.filter(|x| x.batch) {
+        xentop_compat::batch(src, &x)
+    } else if o.batch {
         batch(src, &o)
     } else {
         run_ui(src, &o)

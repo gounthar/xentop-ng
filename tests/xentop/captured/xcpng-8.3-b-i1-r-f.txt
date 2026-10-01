@@ -1,0 +1,18 @@
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+       b-vm-01 --b---      30479    0.0    8388596    8.4    8389620       8.4     4    0        0        0    2        0  1333757  8634528  112690741   87614180    0
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+      Domain-0 -----r     330258    0.0    6078464    6.1    6078464       6.1    12    0        0        0    0        0        0        0          0          0    0
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+       f-vm-02 --b---      38107    0.0    4194292    4.2    4195316       4.2     2    0        0        0    2        0  9093848 13998648  685047429  424867416    0
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+h-vm-03-sample --b---       4070    0.0    4196328    4.2    4197352       4.2     2    0        0        0    1        0   317002   347204    9036992    8415073    0
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+        i-vm04 --b---         20    0.0    8390632    8.4    8391656       8.4     8    0        0        0    1        0    26361     1532    1084455      37544    0
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+     n-vm-05-x --b---      10482    0.0    4194292    4.2    4195316       4.2     2    0        0        0    2        0  1603173  2990090   33136282   29349388    0
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+ r-vm-06 proxy --b---      13749    0.0    2097140    2.1    2098164       2.1     2    0        0        0    1        0    19961  1436388     858542   19087596    0
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+      s-vm 007 --b---      40174    0.0    8388596    8.4    8389620       8.4     4    0        0        0    2        0  1206680  3036140   64463369  220737293    0
+          NAME  STATE   CPU(sec) CPU(%)     MEM(k) MEM(%)  MAXMEM(k) MAXMEM(%) VCPUS NETS NETTX(k) NETRX(k) VBDS   VBD_OO   VBD_RD   VBD_WR  VBD_RSECT  VBD_WSECT SSID
+           xvm --b---      76038    0.0    2097140    2.1    2098164       2.1     2    0        0        0    1        0   169903  4889434    5231610   66013568    0

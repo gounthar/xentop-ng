@@ -1,0 +1,13 @@
+Output of the stock xentop (xen-dom0-tools-4.17.6-9.3.xcpng8.3) on a real
+XCP-ng 8.3 host, captured on 2026-10-01:
+
+  xcpng-8.3-b-i1-n-x-v.txt   xentop -b -i 1 -n -x -v
+  xcpng-8.3-b-i2-d1.txt      xentop -b -i 2 -d 1
+  xcpng-8.3-b-i1-r-f.txt     xentop -b -i 1 -r -f
+  xcpng-8.3-help.txt         xentop -h
+
+../xcpng-host.snap rebuilds the first one's samples; the golden test
+`matches_capture_from_real_host` checks xentop-ng reproduces it exactly.
+VM names are replaced by placeholders of the same length that sort the
+same way, so the layout and truncation are unchanged.
+NETS is 0 everywhere: the stock libxenstat loses VIFs on Open vSwitch hosts.

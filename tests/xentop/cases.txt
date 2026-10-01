@@ -1,0 +1,10 @@
+# <case name> <fixture> <xentop arguments>; see harness/regen.sh
+host-b-i2         xcpng-host.snap -b -i 2 -d 1
+host-nxv          xcpng-host.snap -b -i 1 -n -x -v
+host-rf           xcpng-host.snap -b -i 1 -r -f
+host-zp           xcpng-host.snap -b -i 2 -z -p
+syn-default       synthetic.snap -b -i 3
+syn-full          synthetic.snap -b -i 3 -f -n -x -v -r
+syn-zp            synthetic.snap -b -i 3 -z -p -d 2
+syn-combined      synthetic.snap -bfi3 --net --vb
+syn-long          synthetic.snap --batch --iterations=2 --vcpus --dom0-first stray -- -n

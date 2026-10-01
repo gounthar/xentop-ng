@@ -1,0 +1,15 @@
+Usage: xentop [OPTION]
+Displays ongoing information about xen vm resources 
+
+-h, --help           display this help and exit
+-V, --version        output version information and exit
+-d, --delay=SECONDS  seconds between updates (default 3)
+-n, --networks       output vif network data
+-x, --vbds           output vbd block device data
+-r, --repeat-header  repeat table header before each domain
+-v, --vcpus          output vcpu data
+-b, --batch	     output in batch mode, no user input accepted
+-i, --iterations     number of iterations before exiting
+-f, --full-name      output the full domain name (not truncated)
+
+Report bugs to <xen-devel@lists.xen.org>.
