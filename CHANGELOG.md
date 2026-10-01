@@ -5,6 +5,9 @@ release binaries are on the [releases page](https://github.com/olivierlambert/xe
 
 ## [0.3.0] - 2026-10-01
 
+Screenshots: [SR view](docs/sr-view.png) and [domain details](docs/detail.png)
+(also in the [README](README.md#features)).
+
 ### Added
 
 - **Names from xapi** on XCP-ng/XenServer hosts: SR and VDI name-labels, the
