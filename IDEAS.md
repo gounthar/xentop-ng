@@ -91,6 +91,28 @@ something expensive for a few seconds and shows it in place.
   data, for a cluster-wide top.
 - Optional read-only xapi mode for richer names: SR types, networks.
 
+## Usability
+
+Done:
+
+- ✓ Preferences file (theme, boxes, sort, columns, refresh, colours), saved
+  on quit or with `W`.
+- ✓ Column chooser (`o`); columns are one registry entry each
+  (`src/ui/columns.rs`), so new metrics are cheap to add.
+- ✓ Sort by any numeric column, by clicking its title or with `s`/`S`.
+- ✓ Memory history in the domain details.
+- ✓ `NO_COLOR`, `--colors mono` and a `colorblind` theme.
+- ✓ Footer hints that fit the width; grouped, scrollable help; header
+  toasts.
+
+Next:
+
+- Column widths: let the user widen NAME or pin a width in the config.
+- Remappable keys, once the key space gets crowded.
+- Save named layouts ("storage triage", "CPU hunt") and switch between
+  them.
+- A light theme for light terminals.
+
 ## Tooling and quality
 
 - **Scenario files for the demo:** host shape, fleet and scripted events

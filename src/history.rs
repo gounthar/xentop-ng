@@ -31,6 +31,8 @@ pub struct DomHistory {
     pub rd: Series,
     pub wr: Series,
     pub lat: Series,
+    /// Current memory, bytes.
+    pub mem: Series,
     pub vcpus: Vec<Series>,
     last_seen: u64,
 }
@@ -89,6 +91,7 @@ impl History {
             e.rd.push(d.disk_rd_bps);
             e.wr.push(d.disk_wr_bps);
             e.lat.push(d.lat_us().unwrap_or(0.0));
+            e.mem.push(d.mem as f64);
             if e.vcpus.len() != d.vcpu_pct.len() {
                 e.vcpus = vec![Series::default(); d.vcpu_pct.len()];
             }
