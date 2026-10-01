@@ -55,6 +55,21 @@ static double avg_ms(unsigned long long dus, unsigned long long dreq)
     return dreq ? (double)dus / dreq / 1000.0 : 0.0;
 }
 
+/* VM names are set by toolstack users who may be less privileged than us:
+ * print them with control and non-ASCII bytes replaced, so a name cannot
+ * smuggle terminal escape sequences into root's terminal. */
+static const char *safe_name(const char *s, char *buf, size_t len)
+{
+    size_t i;
+
+    if (!s)
+        return "(null)";
+    for (i = 0; s[i] && i + 1 < len; i++)
+        buf[i] = (s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : '?';
+    buf[i] = '\0';
+    return buf;
+}
+
 int main(void)
 {
     xenstat_handle *h;
@@ -97,6 +112,8 @@ int main(void)
     }
 
     printf("\n== VBDs ==\n");
+    char name[128];
+
     for (i = 0; i < xenstat_node_num_domains(n1); i++) {
         xenstat_domain *d = xenstat_node_domain_by_index(n1, i);
         unsigned int domid = xenstat_domain_id(d);
@@ -108,7 +125,7 @@ int main(void)
 
             printf("dom %u (%s) %s-%u err=%d has_ext=%u\n"
                    "  submitted rd=%llu wr=%llu  sects rd=%llu wr=%llu  oo=%llu\n",
-                   domid, xenstat_domain_name(d),
+                   domid, safe_name(xenstat_domain_name(d), name, sizeof(name)),
                    vbd_type(xenstat_vbd_type(v)), xenstat_vbd_dev(v),
                    xenstat_vbd_error(v), xenstat_vbd_has_ext(v),
                    xenstat_vbd_rd_reqs(v), xenstat_vbd_wr_reqs(v),

@@ -1,0 +1,6 @@
+# Scripts source build/common.sh relative to their own directory.
+external-sources=true
+source-path=SCRIPTDIR
+# Single-quoted scripts are run inside the build container, and deploy.sh
+# expands its (constant) paths client-side on purpose.
+disable=SC2016,SC2029

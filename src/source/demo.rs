@@ -2,7 +2,7 @@
 //! anywhere. Loads follow smooth periodic patterns with random bursts, disk
 //! latency grows with queueing, and short-lived CI domains come and go.
 
-use super::Source;
+use super::{Avail, DataStatus, Source};
 use crate::model::*;
 use anyhow::Result;
 use std::f64::consts::TAU;
@@ -77,6 +77,7 @@ struct SimDom {
 }
 
 pub struct DemoSource {
+    stock: bool,
     rng: Rng,
     /// Simulated time (s); decoupled from the wall clock so the host can
     /// be run forward during calibration.
@@ -123,6 +124,8 @@ pub struct DemoConfig {
     pub cpu_load: f64,
     /// Fraction of RAM assigned to domains (0..1).
     pub mem_use: f64,
+    /// Pretend to be a stock libxenstat without fallbacks.
+    pub stock: bool,
 }
 
 impl Default for DemoConfig {
@@ -132,6 +135,7 @@ impl Default for DemoConfig {
             mem: 128 * GIB,
             cpu_load: 0.55,
             mem_use: 0.80,
+            stock: false,
         }
     }
 }
@@ -173,6 +177,7 @@ impl DemoSource {
             mem,
             ci_scale: scale.sqrt().max(1.0),
             load_k: 1.0,
+            stock: cfg.stock,
             mem_k: 1.0,
             pcpu_idle: vec![0; pcpus as usize],
             doms: Vec::new(),
@@ -220,29 +225,167 @@ impl DemoSource {
             nets,
         };
         let mut tpls = vec![
-            t("web-frontend", 2.0, 1.0, 4, 8.0, 8.0,
-              net(io(prof(0.33, 0.25, 40.0, 0.08), 120.0, 60.0, 8192.0, 180.0, 30000.0), 24e6, 95e6), 1, 1),
-            t("pg-primary", 1.0, 1.0, 8, 16.0, 16.0,
-              net(io(prof(0.45, 0.2, 90.0, 0.05), 3200.0, 1800.0, 8192.0, 320.0, 9000.0), 40e6, 30e6), 2, 1),
-            t("pg-replica", 1.0, 1.0, 4, 16.0, 16.0,
-              net(io(prof(0.15, 0.1, 90.0, 0.02), 400.0, 1700.0, 8192.0, 450.0, 7000.0), 30e6, 2e6), 2, 1),
-            t("k8s-worker", 3.0, 1.0, 6, 12.0, 12.0,
-              net(io(prof(0.5, 0.3, 67.0, 0.1), 300.0, 500.0, 32768.0, 400.0, 6000.0), 60e6, 45e6), 1, 2),
-            t("win2022-ad", 1.0, 0.5, 2, 4.0, 6.0,
-              net(io(prof(0.04, 0.03, 300.0, 0.01), 15.0, 25.0, 4096.0, 600.0, 3000.0), 0.3e6, 0.4e6), 1, 1),
-            t("backup-proxy", 1.0, 0.5, 2, 2.0, 2.0,
-              net(io(prof(0.2, 0.2, 180.0, 0.02), 900.0, 0.0, 1048576.0, 2500.0, 900.0), 0.5e6, 180e6), 1, 1),
-            t("IO-lab-Debian13", 1.0, 0.0, 2, 2.0, 2.0,
-              net(io(prof(0.25, 0.25, 30.0, 0.15), 9000.0, 9000.0, 4096.0, 55.0, 60000.0), 0.1e6, 0.1e6), 3, 1),
+            t(
+                "web-frontend",
+                2.0,
+                1.0,
+                4,
+                8.0,
+                8.0,
+                net(
+                    io(prof(0.33, 0.25, 40.0, 0.08), 120.0, 60.0, 8192.0, 180.0, 30000.0),
+                    24e6,
+                    95e6,
+                ),
+                1,
+                1,
+            ),
+            t(
+                "pg-primary",
+                1.0,
+                1.0,
+                8,
+                16.0,
+                16.0,
+                net(
+                    io(prof(0.45, 0.2, 90.0, 0.05), 3200.0, 1800.0, 8192.0, 320.0, 9000.0),
+                    40e6,
+                    30e6,
+                ),
+                2,
+                1,
+            ),
+            t(
+                "pg-replica",
+                1.0,
+                1.0,
+                4,
+                16.0,
+                16.0,
+                net(
+                    io(prof(0.15, 0.1, 90.0, 0.02), 400.0, 1700.0, 8192.0, 450.0, 7000.0),
+                    30e6,
+                    2e6,
+                ),
+                2,
+                1,
+            ),
+            t(
+                "k8s-worker",
+                3.0,
+                1.0,
+                6,
+                12.0,
+                12.0,
+                net(
+                    io(prof(0.5, 0.3, 67.0, 0.1), 300.0, 500.0, 32768.0, 400.0, 6000.0),
+                    60e6,
+                    45e6,
+                ),
+                1,
+                2,
+            ),
+            t(
+                "win2022-ad",
+                1.0,
+                0.5,
+                2,
+                4.0,
+                6.0,
+                net(
+                    io(prof(0.04, 0.03, 300.0, 0.01), 15.0, 25.0, 4096.0, 600.0, 3000.0),
+                    0.3e6,
+                    0.4e6,
+                ),
+                1,
+                1,
+            ),
+            t(
+                "backup-proxy",
+                1.0,
+                0.5,
+                2,
+                2.0,
+                2.0,
+                net(
+                    io(prof(0.2, 0.2, 180.0, 0.02), 900.0, 0.0, 1048576.0, 2500.0, 900.0),
+                    0.5e6,
+                    180e6,
+                ),
+                1,
+                1,
+            ),
+            t(
+                "IO-lab-Debian13",
+                1.0,
+                0.0,
+                2,
+                2.0,
+                2.0,
+                net(
+                    io(
+                        prof(0.25, 0.25, 30.0, 0.15),
+                        9000.0,
+                        9000.0,
+                        4096.0,
+                        55.0,
+                        60000.0,
+                    ),
+                    0.1e6,
+                    0.1e6,
+                ),
+                3,
+                1,
+            ),
         ];
         // Big iron gets big-iron workloads.
         if pcpus >= 64 {
-            tpls.push(t("ml-train", 0.5, 1.0, 16, 64.0, 64.0,
-                net(io(prof(1.2, 0.2, 240.0, 0.02), 2500.0, 150.0, 1048576.0, 900.0, 4000.0), 150e6, 10e6), 1, 1));
+            tpls.push(t(
+                "ml-train",
+                0.5,
+                1.0,
+                16,
+                64.0,
+                64.0,
+                net(
+                    io(
+                        prof(1.2, 0.2, 240.0, 0.02),
+                        2500.0,
+                        150.0,
+                        1048576.0,
+                        900.0,
+                        4000.0,
+                    ),
+                    150e6,
+                    10e6,
+                ),
+                1,
+                1,
+            ));
         }
         if mem >= 512 * GIB {
-            tpls.push(t("hana-db", 0.0, 0.0, 32, 256.0, 256.0,
-                net(io(prof(0.4, 0.3, 120.0, 0.05), 6000.0, 4000.0, 65536.0, 250.0, 25000.0), 80e6, 60e6), 4, 2));
+            tpls.push(t(
+                "hana-db",
+                0.0,
+                0.0,
+                32,
+                256.0,
+                256.0,
+                net(
+                    io(
+                        prof(0.4, 0.3, 120.0, 0.05),
+                        6000.0,
+                        4000.0,
+                        65536.0,
+                        250.0,
+                        25000.0,
+                    ),
+                    80e6,
+                    60e6,
+                ),
+                4,
+                2,
+            ));
         }
 
         let fixed = |tp: &Tpl| tp.name == "hana-db";
@@ -273,7 +416,15 @@ impl DemoSource {
         let mem_k = (budget / sized(false).max(1.0)).clamp(0.05, 8.0);
         s.mem_k = mem_k;
 
-        s.add("Domain-0", dom0_vcpus, dom0_mem, dom0_mem, prof(0.10, 0.05, 23.0, 0.05), 0, 0);
+        s.add(
+            "Domain-0",
+            dom0_vcpus,
+            dom0_mem,
+            dom0_mem,
+            prof(0.10, 0.05, 23.0, 0.05),
+            0,
+            0,
+        );
         for tp in &tpls {
             let n = count(tp);
             for i in 1..=n {
@@ -361,10 +512,22 @@ impl DemoSource {
         }
     }
 
-    fn add(&mut self, name: &str, vcpus: usize, mem: u64, max_mem: u64, prof: Profile, disks: u32, nets: u32) {
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        name: &str,
+        vcpus: usize,
+        mem: u64,
+        max_mem: u64,
+        prof: Profile,
+        disks: u32,
+        nets: u32,
+    ) {
         let id = self.next_id;
         self.next_id += 1;
-        let mut shares: Vec<f64> = (0..disks).map(|i| if i == 0 { 1.0 } else { 0.6 / i as f64 }).collect();
+        let mut shares: Vec<f64> = (0..disks)
+            .map(|i| if i == 0 { 1.0 } else { 0.6 / i as f64 })
+            .collect();
         let total: f64 = shares.iter().sum();
         shares.iter_mut().for_each(|s| *s /= total);
         let phase = self.rng.range(0.0, TAU);
@@ -402,7 +565,12 @@ impl DemoSource {
                     }
                 })
                 .collect(),
-            nets: (0..nets).map(|i| NetRaw { id: i, ..Default::default() }).collect(),
+            nets: (0..nets)
+                .map(|i| NetRaw {
+                    id: i,
+                    ..Default::default()
+                })
+                .collect(),
             paused: false,
             ttl: None,
         });
@@ -546,7 +714,20 @@ impl Source for DemoSource {
     }
 
     fn describe(&self) -> String {
-        "demo (simulated host)".into()
+        if self.stock {
+            "demo (simulated host, stock libxenstat)".into()
+        } else {
+            "demo (simulated host)".into()
+        }
+    }
+
+    fn status(&self) -> DataStatus {
+        let m = if self.stock { Avail::Missing } else { Avail::Lib };
+        DataStatus {
+            pcpu: m,
+            vbd_latency: m,
+            vifs: Avail::Lib,
+        }
     }
 
     fn warmup(&mut self, secs: u32) -> Vec<Snapshot> {
@@ -567,7 +748,6 @@ impl Source for DemoSource {
 
 impl DemoSource {
     fn snapshot(&self, at: Instant) -> Snapshot {
-
         let used: u64 = self.doms.iter().map(|d| d.mem).sum::<u64>() + 512 * MIB;
         let tot = self.mem;
         Snapshot {
@@ -578,7 +758,13 @@ impl DemoSource {
             cpu_hz: 3_600_000_000,
             tot_mem: tot,
             free_mem: tot.saturating_sub(used),
-            pcpu_idle_ns: Some(self.pcpu_idle.iter().enumerate().map(|(i, &ns)| (i as u32, ns)).collect()),
+            pcpu_idle_ns: (!self.stock).then(|| {
+                self.pcpu_idle
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &ns)| (i as u32, ns))
+                    .collect()
+            }),
             domains: self
                 .doms
                 .iter()
@@ -597,7 +783,14 @@ impl DemoSource {
                     cur_mem: d.mem,
                     max_mem: d.max_mem,
                     nets: d.nets.clone(),
-                    vbds: d.disks.iter().map(|x| x.raw).collect(),
+                    vbds: d
+                        .disks
+                        .iter()
+                        .map(|x| VbdRaw {
+                            ext: if self.stock { None } else { x.raw.ext },
+                            ..x.raw
+                        })
+                        .collect(),
                 })
                 .collect(),
         }

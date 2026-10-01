@@ -281,11 +281,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
     let dt = cur.at.duration_since(prev.at).as_secs_f64().max(1e-3);
     let dt_ns = dt * 1e9;
 
-    let prev_doms: HashMap<u32, &DomainRaw> = prev
-        .domains
-        .iter()
-        .map(|d| (d.id, d))
-        .collect();
+    let prev_doms: HashMap<u32, &DomainRaw> = prev.domains.iter().map(|d| (d.id, d)).collect();
 
     let mut host = HostRates {
         hostname: cur.hostname.clone(),
@@ -333,8 +329,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             let pn = p.and_then(|p| p.nets.iter().find(|x| x.id == n.id));
             let mut nr = NetRates {
                 id: n.id,
-                errs: n.rerrs + n.terrs,
-                drops: n.rdrop + n.tdrop,
+                errs: n.rerrs.saturating_add(n.terrs),
+                drops: n.rdrop.saturating_add(n.tdrop),
                 ..Default::default()
             };
             if let Some(pn) = pn {
@@ -347,8 +343,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             }
             r.net_rx_bps += nr.rx_bps;
             r.net_tx_bps += nr.tx_bps;
-            r.net_errs += nr.errs;
-            r.net_drops += nr.drops;
+            r.net_errs = r.net_errs.saturating_add(nr.errs);
+            r.net_drops = r.net_drops.saturating_add(nr.drops);
             r.nets.push(nr);
         }
 
@@ -359,7 +355,11 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                 dev: v.dev,
                 name: vbd_name(v.dev),
                 kind: Some(v.kind),
-                errors: v.ext.map(|e| e.io_errors).unwrap_or(0) + v.error as u64,
+                errors: v
+                    .ext
+                    .map(|e| e.io_errors)
+                    .unwrap_or(0)
+                    .saturating_add(v.error as u64),
                 ..Default::default()
             };
             // No in-flight estimate: tapdisk counts empty flushes as
@@ -376,10 +376,10 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                     let (rn, wn) = (d(e.rd_done, pe.rd_done), d(e.wr_done, pe.wr_done));
                     vr.rd_lat_us = lat(ru, rn);
                     vr.wr_lat_us = lat(wu, wn);
-                    rd_us += ru;
-                    wr_us += wu;
-                    rd_done += rn;
-                    wr_done += wn;
+                    rd_us = rd_us.saturating_add(ru);
+                    wr_us = wr_us.saturating_add(wu);
+                    rd_done = rd_done.saturating_add(rn);
+                    wr_done = wr_done.saturating_add(wn);
                 }
             }
             r.disk_rd_bps += vr.rd_bps;
@@ -387,7 +387,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             r.disk_rd_iops += vr.rd_iops;
             r.disk_wr_iops += vr.wr_iops;
             r.disk_oo_ps += vr.oo_ps;
-            r.disk_errors += vr.errors;
+            r.disk_errors = r.disk_errors.saturating_add(vr.errors);
             r.vbds.push(vr);
         }
         r.disk_rd_lat_us = lat(rd_us, rd_done);
@@ -399,10 +399,10 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
         host.disk_wr_bps += r.disk_wr_bps;
         host.disk_rd_iops += r.disk_rd_iops;
         host.disk_wr_iops += r.disk_wr_iops;
-        h_rd_us += rd_us;
-        h_wr_us += wr_us;
-        h_rd_done += rd_done;
-        h_wr_done += wr_done;
+        h_rd_us = h_rd_us.saturating_add(rd_us);
+        h_wr_us = h_wr_us.saturating_add(wr_us);
+        h_rd_done = h_rd_done.saturating_add(rd_done);
+        h_wr_done = h_wr_done.saturating_add(wr_done);
         domains.push(r);
     }
     host.disk_rd_lat_us = lat(h_rd_us, h_rd_done);
@@ -414,7 +414,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             for &(id, c) in ci {
                 let p = prev_idle.get(&id).copied().unwrap_or(c);
                 host.pcpu_ids.push(id);
-                host.pcpu_busy.push((1.0 - d(c, p) as f64 / dt_ns).clamp(0.0, 1.0));
+                host.pcpu_busy
+                    .push((1.0 - d(c, p) as f64 / dt_ns).clamp(0.0, 1.0));
             }
             host.cpu_busy = host.pcpu_busy.iter().sum::<f64>() / host.pcpu_busy.len() as f64;
         }
@@ -442,5 +443,158 @@ mod tests {
         assert_eq!(vbd_name(51808), "xvdg");
         assert_eq!(vbd_name(768), "hda");
         assert_eq!(vbd_name((1 << 28) | (27 << 8)), "xvdab");
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn snap(at: Instant, doms: Vec<DomainRaw>) -> Snapshot {
+        Snapshot {
+            at,
+            hostname: "h".into(),
+            xen_version: "x".into(),
+            num_cpus: 2,
+            cpu_hz: 0,
+            tot_mem: 1 << 30,
+            free_mem: 0,
+            pcpu_idle_ns: None,
+            domains: doms,
+        }
+    }
+
+    fn dom(id: u32, name: &str, cpu_ns: u64, rd_reqs: u64) -> DomainRaw {
+        DomainRaw {
+            id,
+            name: name.into(),
+            state: DomState::Running,
+            cpu_ns,
+            vcpus: vec![VcpuRaw {
+                online: true,
+                ns: cpu_ns,
+            }],
+            cur_mem: 0,
+            max_mem: 0,
+            nets: vec![],
+            vbds: vec![VbdRaw {
+                dev: 51712,
+                kind: VbdKind::Vbd3,
+                oo_reqs: 0,
+                rd_reqs,
+                wr_reqs: 0,
+                rd_sects: 0,
+                wr_sects: 0,
+                error: false,
+                ext: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn counters_going_backwards_are_not_negative_or_huge() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        // tapdisk restarted: request counter reset.
+        let r = compute(
+            &snap(t0, vec![dom(5, "vm", 10, 1_000_000)]),
+            &snap(t1, vec![dom(5, "vm", 5, 3)]),
+        );
+        let d = &r.domains[0];
+        assert_eq!(d.cpu_pct, 0.0);
+        assert_eq!(d.disk_rd_iops, 0.0);
+    }
+
+    #[test]
+    fn reused_domid_starts_fresh() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        let r = compute(
+            &snap(t0, vec![dom(5, "old", 0, 0)]),
+            &snap(t1, vec![dom(5, "new", 4_000_000_000, 9)]),
+        );
+        // No previous sample for "new": no bogus 400% spike.
+        assert_eq!(r.domains[0].cpu_pct, 0.0);
+    }
+
+    #[test]
+    fn zero_interval_is_finite() {
+        let t0 = Instant::now();
+        let r = compute(
+            &snap(t0, vec![dom(1, "a", 0, 0)]),
+            &snap(t0, vec![dom(1, "a", 1_000, 1)]),
+        );
+        assert!(r.domains[0].cpu_pct.is_finite());
+        assert!(r.host.cpu_busy.is_finite());
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    /// Hostile or corrupt counters (e.g. a planted tapdisk stats file) must
+    /// not wrap around and hide errors, nor panic in debug builds.
+    #[test]
+    fn huge_counters_saturate() {
+        let now = Instant::now();
+        let vbd = VbdRaw {
+            dev: 51712,
+            kind: VbdKind::Vbd3,
+            oo_reqs: u64::MAX,
+            rd_reqs: u64::MAX,
+            wr_reqs: u64::MAX,
+            rd_sects: u64::MAX,
+            wr_sects: u64::MAX,
+            error: true,
+            ext: Some(VbdExt {
+                rd_done: u64::MAX,
+                wr_done: u64::MAX,
+                rd_usecs: u64::MAX,
+                wr_usecs: u64::MAX,
+                io_errors: u64::MAX,
+            }),
+        };
+        let net = NetRaw {
+            id: 0,
+            rerrs: u64::MAX,
+            terrs: u64::MAX,
+            rdrop: u64::MAX,
+            tdrop: 1,
+            ..Default::default()
+        };
+        let dom = DomainRaw {
+            id: 3,
+            name: "x".into(),
+            state: DomState::Running,
+            cpu_ns: u64::MAX,
+            vcpus: vec![],
+            cur_mem: u64::MAX,
+            max_mem: u64::MAX,
+            nets: vec![net, net],
+            vbds: vec![vbd, vbd],
+        };
+        let s = Snapshot {
+            at: now,
+            hostname: String::new(),
+            xen_version: String::new(),
+            num_cpus: 0,
+            cpu_hz: 0,
+            tot_mem: 0,
+            free_mem: u64::MAX,
+            pcpu_idle_ns: Some(vec![(0, u64::MAX)]),
+            domains: vec![dom.clone(), DomainRaw { id: 4, ..dom }],
+        };
+        let r = compute(
+            &s,
+            &Snapshot {
+                at: now + std::time::Duration::from_secs(1),
+                ..s.clone()
+            },
+        );
+        assert_eq!(r.domains[0].disk_errors, u64::MAX);
+        assert_eq!(r.domains[0].net_errs, u64::MAX);
+        assert!(r.host.cpu_busy.is_finite());
     }
 }

@@ -142,12 +142,20 @@ pub fn sparkline(data: &[f64], max: f64, width: usize, grad: &Gradient, empty: C
 /// btop-style "■■■■□□□" meter. The gradient runs along the bar, so a full
 /// bar ends in the "hot" colour.
 pub fn meter(frac: f64, width: usize, grad: &Gradient, empty: Color) -> Vec<Span<'static>> {
-    let frac = if frac.is_finite() { frac.clamp(0.0, 1.0) } else { 0.0 };
+    let frac = if frac.is_finite() {
+        frac.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let filled = (frac * width as f64).round() as usize;
     let filled = if frac > 0.0 { filled.max(1) } else { 0 };
     let mut v: Vec<Span<'static>> = (0..filled)
         .map(|i| {
-            let f = if width > 1 { i as f64 / (width - 1) as f64 } else { 1.0 };
+            let f = if width > 1 {
+                i as f64 / (width - 1) as f64
+            } else {
+                1.0
+            };
             Span::styled("■", Style::new().fg(grad.at(f)))
         })
         .collect();

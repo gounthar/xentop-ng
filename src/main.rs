@@ -3,14 +3,18 @@ mod fmt;
 mod history;
 mod model;
 mod source;
+mod term;
 mod theme;
 mod ui;
 
 use anyhow::{bail, Context, Result};
 use app::App;
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
-use ratatui::crossterm::execute;
-use source::{demo::{DemoConfig, DemoSource}, xenstat::XenstatSource, Source};
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use source::{
+    demo::{DemoConfig, DemoSource},
+    xenstat::XenstatSource,
+    Source,
+};
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -28,9 +32,14 @@ OPTIONS:
         --demo-load PCT   demo: average host CPU load to aim for (default 55)
         --demo-mem-use PCT
                           demo: share of RAM given to VMs (default 80)
+        --demo-stock      demo: behave like a stock libxenstat with no
+                          fallbacks (no pCPU detail, no disk latency)
                           Any --demo-* option implies --demo.
-        --lib PATH        libxenstat to load (default: search, LD_LIBRARY_PATH first)
+        --lib PATH        libxenstat to load (default: search, LD_LIBRARY_PATH first).
+                          As root, must be root-owned and not group/world-writable.
         --theme NAME      btop, xcp-ng, dracula, gruvbox
+        --colors MODE     truecolor or 256 (default: truecolor, 256 on the
+                          Linux console)
     -b, --batch           print one JSON object per interval instead of the UI
     -n, --iterations N    stop after N samples (batch mode)
     -h, --help            this help
@@ -43,6 +52,7 @@ struct Opts {
     demo_cfg: DemoConfig,
     lib: Option<String>,
     theme: usize,
+    ansi256: bool,
     batch: bool,
     iterations: Option<u64>,
 }
@@ -70,6 +80,8 @@ fn parse_args() -> Result<Opts> {
         demo_cfg: DemoConfig::default(),
         lib: None,
         theme: 0,
+        // The Linux VT has no 24-bit colour; most other terminals do.
+        ansi256: std::env::var("TERM").is_ok_and(|t| t == "linux"),
         batch: false,
         iterations: None,
     };
@@ -91,9 +103,16 @@ fn parse_args() -> Result<Opts> {
                 o.demo = true;
                 o.demo_cfg.pcpus = val(&a)?.parse::<u32>().context("bad --demo-cpus")?.clamp(1, 4096);
             }
+            "--demo-stock" => {
+                o.demo = true;
+                o.demo_cfg.stock = true;
+            }
             "--demo-load" | "--demo-mem-use" => {
                 o.demo = true;
-                let pct: f64 = val(&a)?.trim_end_matches('%').parse().with_context(|| format!("bad {a}"))?;
+                let pct: f64 = val(&a)?
+                    .trim_end_matches('%')
+                    .parse()
+                    .with_context(|| format!("bad {a}"))?;
                 let f = (pct / 100.0).clamp(0.01, 1.0);
                 if a == "--demo-load" {
                     o.demo_cfg.cpu_load = f;
@@ -102,6 +121,11 @@ fn parse_args() -> Result<Opts> {
                 }
             }
             "--lib" => o.lib = Some(val(&a)?),
+            "--colors" => match val(&a)?.as_str() {
+                "256" => o.ansi256 = true,
+                "truecolor" | "24bit" => o.ansi256 = false,
+                m => bail!("--colors: expected truecolor or 256, got {m}"),
+            },
             "--theme" => {
                 let t = val(&a)?;
                 o.theme = theme::by_name(&t).with_context(|| format!("unknown theme {t}"))?;
@@ -130,7 +154,9 @@ fn batch(mut src: Box<dyn Source>, o: &Opts) -> Result<()> {
         std::thread::sleep(o.delay);
         let cur = src.sample()?;
         let r = model::compute(&prev, &cur);
-        serde_json::to_writer(&mut out, &r)?;
+        let mut v = serde_json::to_value(&r)?;
+        v["sources"] = serde_json::to_value(src.status())?;
+        serde_json::to_writer(&mut out, &v)?;
         writeln!(out)?;
         out.flush()?;
         prev = cur;
@@ -143,6 +169,7 @@ fn batch(mut src: Box<dyn Source>, o: &Opts) -> Result<()> {
 
 fn run_ui(src: Box<dyn Source>, o: &Opts) -> Result<()> {
     let mut app = App::new(src, o.delay, o.theme);
+    app.ansi256 = o.ansi256;
     let history = app.source.warmup(600);
     if history.is_empty() {
         // Two quick samples so the first frame already has rates.
@@ -154,12 +181,12 @@ fn run_ui(src: Box<dyn Source>, o: &Opts) -> Result<()> {
         for snap in history {
             app.ingest(snap);
         }
+        app.status = app.source.status();
         app.next_sample = Instant::now() + o.delay;
     }
 
-    let mut term = ratatui::init();
-    execute!(std::io::stdout(), EnableMouseCapture)?;
-    let res = (|| -> Result<()> {
+    let (mut term, _guard) = term::Guard::enter()?;
+    (|| -> Result<()> {
         while !app.quit {
             term.draw(|f| ui::draw(f, &mut app))?;
             // Wake at the next sample, or once a second for the clock.
@@ -178,10 +205,7 @@ fn run_ui(src: Box<dyn Source>, o: &Opts) -> Result<()> {
             }
         }
         Ok(())
-    })();
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
-    ratatui::restore();
-    res
+    })()
 }
 
 fn main() -> Result<()> {

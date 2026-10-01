@@ -47,7 +47,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         24..=31 => (9, 0),
         _ => (0, 0),
     };
-    if h >= 24 && h < 32 && !top_on {
+    if (24..32).contains(&h) && !top_on {
         mid_h = 8;
     }
     if !top_on {
@@ -97,7 +97,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if mid_h > 0 {
         match (app.show[2], app.show[3]) {
             (true, true) => {
-                let [n, d] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(mid);
+                let [n, d] =
+                    Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(mid);
                 net_box(buf, app, &rates, n);
                 disk_box(buf, app, &rates, d);
             }
@@ -131,6 +132,44 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.help {
         help_popup(buf, th, area);
+    }
+    if app.info {
+        info_popup(buf, app, area);
+    }
+    if app.ansi256 {
+        for pos in area.positions() {
+            if let Some(c) = buf.cell_mut(pos) {
+                c.fg = to_256(c.fg);
+                c.bg = to_256(c.bg);
+            }
+        }
+    }
+}
+
+/// Nearest xterm 256-colour palette entry (6x6x6 cube or grey ramp).
+fn to_256(c: Color) -> Color {
+    let Color::Rgb(r, g, b) = c else { return c };
+    const LV: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    let near = |v: u8| -> usize {
+        LV.iter()
+            .enumerate()
+            .min_by_key(|(_, &l)| (l as i32 - v as i32).abs())
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    };
+    let (ri, gi, bi) = (near(r), near(g), near(b));
+    let d = |a: (u8, u8, u8)| {
+        let f = |x: u8, y: u8| (x as i32 - y as i32).pow(2);
+        f(a.0, r) + f(a.1, g) + f(a.2, b)
+    };
+    let cube = (LV[ri], LV[gi], LV[bi]);
+    let avg = (r as u32 + g as u32 + b as u32) / 3;
+    let gi_ = ((avg.saturating_sub(8)) / 10).min(23) as u8;
+    let gv = 8 + 10 * gi_;
+    if d((gv, gv, gv)) < d(cube) {
+        Color::Indexed(232 + gi_)
+    } else {
+        Color::Indexed(16 + 36 * ri as u8 + 6 * gi as u8 + bi as u8)
     }
 }
 
@@ -188,11 +227,23 @@ fn header(buf: &mut Buffer, app: &App, area: Rect) {
         Span::styled(ver, Style::new().fg(th.fg)),
         dim(th, format!("  {}", app.source_desc)),
     ]);
+    // Subtle hint when some data is missing or rebuilt by fallbacks
+    // (libxenstat patches not upstream yet). Details behind `i`.
+    let mut left = left;
+    if app.status.degraded() {
+        left.push_span(Span::styled("  ◐ partial data", Style::new().fg(th.warn)));
+        left.push_span(dim(th, " (i)"));
+    } else if app.status.uses_fallback() {
+        left.push_span(dim(th, "  ◐ fallback (i)"));
+    }
     buf.set_line(area.x, area.y, &left, area.width);
 
     let mut right = Vec::new();
     if let Some(e) = &app.error {
-        right.push(Span::styled(format!(" {} ", fmt::trunc(e, 50)), Style::new().fg(th.bad)));
+        right.push(Span::styled(
+            format!(" {} ", fmt::trunc(e, 50)),
+            Style::new().fg(th.bad),
+        ));
     }
     if app.paused {
         right.push(Span::styled(" ⏸ paused ", Style::new().fg(th.bg).bg(th.warn)));
@@ -239,7 +290,11 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     let rows = inner.height as usize;
     let budget = (inner.width as usize * 11) / 20;
     let lab_w = format!("C{}", h.pcpu_ids.iter().max().copied().unwrap_or(0)).len();
-    let view = if n > 0 { pcpu_view(n, rows, budget, lab_w) } else { PcpuView::None };
+    let view = if n > 0 {
+        pcpu_view(n, rows, budget, lab_w)
+    } else {
+        PcpuView::None
+    };
     let grid_w = match view {
         PcpuView::List { width, .. } | PcpuView::Heat { width, .. } => width,
         PcpuView::None => budget.min(38),
@@ -247,7 +302,13 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
 
     let gx_w = inner.width.saturating_sub(grid_w as u16 + 1);
     let graph = Rect::new(inner.x, inner.y, gx_w, inner.height);
-    area_graph(buf, graph, &app.hist.cpu.tail(gx_w as usize * 2), 100.0, Paint::Height(&th.cpu));
+    area_graph(
+        buf,
+        graph,
+        &app.hist.cpu.tail(gx_w as usize * 2),
+        100.0,
+        Paint::Height(&th.cpu),
+    );
 
     let busy = h.cpu_busy * 100.0;
     let mut lbl = vec![
@@ -265,11 +326,23 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     put(buf, graph.x, graph.y, graph.width, &Line::from(lbl));
 
     let gx = inner.x + gx_w + 1;
-    if let PcpuView::Heat { cols, cw, half, labels, .. } = view {
+    if let PcpuView::Heat {
+        cols,
+        cw,
+        half,
+        labels,
+        ..
+    } = view
+    {
         let area = Rect::new(gx, inner.y, grid_w as u16, inner.height);
         pcpu_heatmap(buf, th, h, area, cols, cw, half, labels.then_some(lab_w));
         // The hottest pCPUs, since single cells are hard to read.
-        let mut hot: Vec<(u32, f64)> = h.pcpu_ids.iter().copied().zip(h.pcpu_busy.iter().copied()).collect();
+        let mut hot: Vec<(u32, f64)> = h
+            .pcpu_ids
+            .iter()
+            .copied()
+            .zip(h.pcpu_busy.iter().copied())
+            .collect();
         hot.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut sp = vec![dim(th, " hottest ")];
         let mut used = 9;
@@ -302,7 +375,10 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
                 sp.extend(mini_graph(&app.hist.pcpu[i].tail(gw * 2), 100.0, gw, &th.cpu));
                 sp.push(Span::raw(" "));
             }
-            sp.push(Span::styled(format!("{:>4.0}%", v * 100.0), Style::new().fg(th.cpu.at(v))));
+            sp.push(Span::styled(
+                format!("{:>4.0}%", v * 100.0),
+                Style::new().fg(th.cpu.at(v)),
+            ));
             put(buf, x, y, ew.saturating_sub(2) as u16, &Line::from(sp));
         }
     } else {
@@ -310,16 +386,30 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         let mut doms: Vec<&DomRates> = r.domains.iter().collect();
         doms.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct));
         let w = grid_w;
-        put(buf, gx, inner.y, w as u16, &Line::from(dim(th, "top domains  (pCPU view: patched lib)")));
+        put(
+            buf,
+            gx,
+            inner.y,
+            w as u16,
+            &Line::from(dim(th, "top domains  (no per-pCPU data, see i)")),
+        );
         let mw = w.saturating_sub(14 + 6 + 2);
         for (i, d) in doms.iter().take(rows.saturating_sub(1)).enumerate() {
             let cap = (d.vcpus_online.max(1) * 100) as f64;
-            let mut sp = vec![Span::styled(
-                format!("{:<14}", fmt::trunc(&d.name, 13)),
-                Style::new().fg(th.fg),
-            )];
+            // IDs next to names: anyone who can rename a VM can call it
+            // "Domain-0".
+            let mut sp = vec![
+                dim(th, format!("{:>3} ", d.id)),
+                Span::styled(
+                    format!("{} ", fmt::pad(&d.name, 9, false)),
+                    Style::new().fg(th.fg),
+                ),
+            ];
             sp.extend(meter(d.cpu_pct / cap, mw, &th.cpu, th.meter_empty));
-            sp.push(Span::styled(format!("{:>6}", fmt::pct(d.cpu_pct)), Style::new().fg(th.fg)));
+            sp.push(Span::styled(
+                format!("{:>6}", fmt::pct(d.cpu_pct)),
+                Style::new().fg(th.fg),
+            ));
             put(buf, gx, inner.y + 1 + i as u16, w as u16, &Line::from(sp));
         }
     }
@@ -329,10 +419,20 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
 enum PcpuView {
     None,
     /// One line per pCPU: label, mini history graph (`gw` cells), percent.
-    List { width: usize, cols: usize, gw: usize },
+    List {
+        width: usize,
+        cols: usize,
+        gw: usize,
+    },
     /// One coloured cell per pCPU, `cw` columns wide; `half` packs two pCPU
     /// rows per text row with half-block glyphs.
-    Heat { width: usize, cols: usize, cw: usize, half: bool, labels: bool },
+    Heat {
+        width: usize,
+        cols: usize,
+        cw: usize,
+        half: bool,
+        labels: bool,
+    },
 }
 
 /// Pick the richest pCPU view that fits `max_w` x `rows`.
@@ -356,16 +456,29 @@ fn pcpu_view(n: usize, rows: usize, max_w: usize, lab_w: usize) -> PcpuView {
             for cols in [round.min(n), min_cols] {
                 let width = if labels { lab_w + 1 } else { 0 } + cols * cw;
                 if width <= max_w {
-                    return PcpuView::Heat { width, cols, cw, half, labels };
+                    return PcpuView::Heat {
+                        width,
+                        cols,
+                        cw,
+                        half,
+                        labels,
+                    };
                 }
             }
         }
     }
     // Enormous host in a tiny box: densest layout, clipped.
     let cols = n.div_ceil(rows * 2);
-    PcpuView::Heat { width: max_w, cols, cw: 1, half: true, labels: false }
+    PcpuView::Heat {
+        width: max_w,
+        cols,
+        cw: 1,
+        half: true,
+        labels: false,
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pcpu_heatmap(
     buf: &mut Buffer,
     th: &Theme,
@@ -394,7 +507,13 @@ fn pcpu_heatmap(
         let y = area.y + ty as u16;
         if let Some(w) = label_w {
             let id = h.pcpu_ids.get(first).copied().unwrap_or(first as u32);
-            buf.set_stringn(area.x, y, format!("{:<w$}", format!("C{id}")), w, Style::new().fg(th.dim));
+            buf.set_stringn(
+                area.x,
+                y,
+                format!("{:<w$}", format!("C{id}")),
+                w,
+                Style::new().fg(th.dim),
+            );
         }
         for c in 0..cols {
             let x = x0 + (c * cw) as u16;
@@ -432,7 +551,10 @@ fn mem_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         th,
         "²",
         "mem",
-        vec![Span::styled(fmt::bytes(h.mem_total as f64), Style::new().fg(th.fg)), dim(th, " total")],
+        vec![
+            Span::styled(fmt::bytes(h.mem_total as f64), Style::new().fg(th.fg)),
+            dim(th, " total"),
+        ],
     );
     let inner = block.inner(area);
     block.render(area, buf);
@@ -467,7 +589,7 @@ fn mem_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         y += 1;
     }
     let mut doms: Vec<&DomRates> = r.domains.iter().collect();
-    doms.sort_by(|a, b| b.mem.cmp(&a.mem));
+    doms.sort_by_key(|d| std::cmp::Reverse(d.mem));
     let nw = (w / 3).clamp(8, 16);
     let mw = w.saturating_sub(nw + 1 + 7);
     for d in doms {
@@ -475,14 +597,20 @@ fn mem_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             break;
         }
         let f = d.mem as f64 / h.mem_total.max(1) as f64;
-        let mut sp = vec![Span::styled(
-            format!("{:<nw$} ", fmt::trunc(&d.name, nw)),
-            Style::new().fg(th.fg),
-        )];
+        let mut sp = vec![
+            dim(th, format!("{:>3} ", d.id)),
+            Span::styled(
+                format!("{} ", fmt::pad(&d.name, nw.saturating_sub(4), false)),
+                Style::new().fg(th.fg),
+            ),
+        ];
         // sqrt() so small domains remain visible next to big ones; the
         // value on the right is absolute.
         sp.extend(meter(f.sqrt(), mw, &th.mem, th.meter_empty));
-        sp.push(Span::styled(format!("{:>7}", fmt::bytes(d.mem as f64)), Style::new().fg(th.fg)));
+        sp.push(Span::styled(
+            format!("{:>7}", fmt::bytes(d.mem as f64)),
+            Style::new().fg(th.fg),
+        ));
         line(buf, y, Line::from(sp));
         y += 1;
     }
@@ -529,7 +657,10 @@ fn net_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         th,
         "³",
         "net",
-        vec![Span::styled(format!("{vifs}"), Style::new().fg(th.fg)), dim(th, " vifs")],
+        vec![
+            Span::styled(format!("{vifs}"), Style::new().fg(th.fg)),
+            dim(th, " vifs"),
+        ],
     );
     let inner = block.inner(area);
     block.render(area, buf);
@@ -574,7 +705,10 @@ fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         th,
         "⁴",
         "disk",
-        vec![Span::styled(format!("{vbds}"), Style::new().fg(th.fg)), dim(th, " vbds")],
+        vec![
+            Span::styled(format!("{vbds}"), Style::new().fg(th.fg)),
+            dim(th, " vbds"),
+        ],
     );
     let inner = block.inner(area);
     block.render(area, buf);
@@ -590,15 +724,26 @@ fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         Line::from(vec![
             Span::styled(format!(" {arrow} "), Style::new().fg(gr.at(1.0))),
             bold(format!("{}/s", fmt::rate(v)), gr.at(0.9)),
-            dim(th, format!("  {} IOPS  peak {}/s ", fmt::count(iops), fmt::rate(pk))),
+            dim(
+                th,
+                format!("  {} IOPS  peak {}/s ", fmt::count(iops), fmt::rate(pk)),
+            ),
         ])
     };
     stacked(
         buf,
         th,
         g,
-        (&rd, &th.rd, lbl("R", h.disk_rd_bps, h.disk_rd_iops, peak(&rd), &th.rd)),
-        (&wr, &th.wr, lbl("W", h.disk_wr_bps, h.disk_wr_iops, peak(&wr), &th.wr)),
+        (
+            &rd,
+            &th.rd,
+            lbl("R", h.disk_rd_bps, h.disk_rd_iops, peak(&rd), &th.rd),
+        ),
+        (
+            &wr,
+            &th.wr,
+            lbl("W", h.disk_wr_bps, h.disk_wr_iops, peak(&wr), &th.wr),
+        ),
         1024.0 * 1024.0,
     );
 
@@ -626,8 +771,14 @@ fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         buf,
         Line::from(vec![
             dim(th, "  avg   "),
-            Span::styled(format!("{:>7}", fmt::lat(h.disk_rd_lat_us)), Style::new().fg(lat_color(th, h.disk_rd_lat_us))),
-            Span::styled(format!("{:>7}", fmt::lat(h.disk_wr_lat_us)), Style::new().fg(lat_color(th, h.disk_wr_lat_us))),
+            Span::styled(
+                format!("{:>7}", fmt::lat(h.disk_rd_lat_us)),
+                Style::new().fg(lat_color(th, h.disk_rd_lat_us)),
+            ),
+            Span::styled(
+                format!("{:>7}", fmt::lat(h.disk_wr_lat_us)),
+                Style::new().fg(lat_color(th, h.disk_wr_lat_us)),
+            ),
         ]),
     );
     let lat_hist: Vec<f64> = app
@@ -642,9 +793,21 @@ fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     if lat_h > 0 && y + lat_h <= bottom {
         let mx = lat_hist.iter().copied().fold(0.0, f64::max);
         let paint = |us: f64| lat_color(th, Some(us));
-        area_graph(buf, Rect::new(sx, y, sw, lat_h), &lat_hist, mx * 1.1, Paint::Value(&paint));
+        area_graph(
+            buf,
+            Rect::new(sx, y, sw, lat_h),
+            &lat_hist,
+            mx * 1.1,
+            Paint::Value(&paint),
+        );
         if mx > 0.0 {
-            put(buf, sx, y, sw, &Line::from(dim(th, format!("peak {}", fmt::lat(Some(mx))))));
+            put(
+                buf,
+                sx,
+                y,
+                sw,
+                &Line::from(dim(th, format!("peak {}", fmt::lat(Some(mx))))),
+            );
         }
     }
 }
@@ -752,12 +915,7 @@ fn layout_cols(width: u16) -> Vec<(Col, usize)> {
 }
 
 fn pad(s: String, w: usize, right: bool) -> String {
-    let s = fmt::trunc(&s, w);
-    if right {
-        format!("{s:>w$}")
-    } else {
-        format!("{s:<w$}")
-    }
+    fmt::pad(&s, w, right)
 }
 
 fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
@@ -766,13 +924,23 @@ fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
     let arrow = if app.reverse { "▲" } else { "▼" };
     let mut right = vec![
         Span::styled(format!("{}", vis_ids.len()), Style::new().fg(th.fg)),
-        dim(th, if app.filter.is_empty() { " domains" } else { " matching" }),
+        dim(
+            th,
+            if app.filter.is_empty() {
+                " domains"
+            } else {
+                " matching"
+            },
+        ),
         dim(th, "  sort "),
         Span::styled(format!("{} {arrow}", app.sort.label()), Style::new().fg(th.key)),
     ];
     if !app.filter.is_empty() && !app.filter_edit {
         right.push(dim(th, "  filter "));
-        right.push(Span::styled(format!("\"{}\"", app.filter), Style::new().fg(th.warn)));
+        right.push(Span::styled(
+            format!("\"{}\"", app.filter),
+            Style::new().fg(th.warn),
+        ));
     }
     let mut block = boxed(th, "⁵", "domains", right);
     let hints: Vec<Span> = if app.filter_edit {
@@ -815,7 +983,11 @@ fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
     let mut x = inner.x;
     for (c, w) in &cols {
         let active = c.sort() == Some(app.sort) && *c != Col::CpuHist;
-        let t = if active { format!("{}{arrow}", c.title()) } else { c.title().to_string() };
+        let t = if active {
+            format!("{}{arrow}", c.title())
+        } else {
+            c.title().to_string()
+        };
         let style = if active {
             Style::new().fg(th.key).add_modifier(Modifier::BOLD)
         } else {
@@ -874,7 +1046,10 @@ fn dom_row(app: &App, th: &Theme, d: &DomRates, cols: &[(Col, usize)]) -> Line<'
     for (c, w) in cols {
         let w = *w;
         match c {
-            Col::Id => sp.push(Span::styled(pad(d.id.to_string(), w, true), Style::new().fg(th.dim))),
+            Col::Id => sp.push(Span::styled(
+                pad(d.id.to_string(), w, true),
+                Style::new().fg(th.dim),
+            )),
             Col::Name => {
                 let st = match d.state {
                     _ if d.id == 0 => Style::new().fg(th.title).add_modifier(Modifier::BOLD),
@@ -919,7 +1094,11 @@ fn dom_row(app: &App, th: &Theme, d: &DomRates, cols: &[(Col, usize)]) -> Line<'
                 sp.extend(meter(f, mw, &th.cpu, th.meter_empty));
                 sp.push(Span::styled(
                     format!("{:>7}", fmt::pct(d.cpu_pct)),
-                    Style::new().fg(if d.cpu_pct < 0.5 { th.dim } else { th.cpu.at(f.max(0.15)) }),
+                    Style::new().fg(if d.cpu_pct < 0.5 {
+                        th.dim
+                    } else {
+                        th.cpu.at(f.max(0.15))
+                    }),
                 ));
             }
             Col::CpuHist => {
@@ -930,15 +1109,28 @@ fn dom_row(app: &App, th: &Theme, d: &DomRates, cols: &[(Col, usize)]) -> Line<'
             Col::Mem => sp.push(num(fmt::bytes(d.mem as f64), false, w, th.mem.at(0.6))),
             Col::NetRx => sp.push(num(fmt::rate(d.net_rx_bps), d.net_rx_bps < 0.5, w, th.rx.at(1.0))),
             Col::NetTx => sp.push(num(fmt::rate(d.net_tx_bps), d.net_tx_bps < 0.5, w, th.tx.at(1.0))),
-            Col::DiskRd => sp.push(num(fmt::rate(d.disk_rd_bps), d.disk_rd_bps < 0.5, w, th.rd.at(1.0))),
-            Col::DiskWr => sp.push(num(fmt::rate(d.disk_wr_bps), d.disk_wr_bps < 0.5, w, th.wr.at(1.0))),
+            Col::DiskRd => sp.push(num(
+                fmt::rate(d.disk_rd_bps),
+                d.disk_rd_bps < 0.5,
+                w,
+                th.rd.at(1.0),
+            )),
+            Col::DiskWr => sp.push(num(
+                fmt::rate(d.disk_wr_bps),
+                d.disk_wr_bps < 0.5,
+                w,
+                th.wr.at(1.0),
+            )),
             Col::Iops => {
                 let v = d.disk_rd_iops + d.disk_wr_iops;
                 sp.push(num(fmt::count(v), v < 0.5, w, th.fg))
             }
             Col::Lat => {
                 let l = d.lat_us();
-                sp.push(Span::styled(pad(fmt::lat(l), w, true), Style::new().fg(lat_color(th, l))));
+                sp.push(Span::styled(
+                    pad(fmt::lat(l), w, true),
+                    Style::new().fg(lat_color(th, l)),
+                ));
             }
         }
         sp.push(Span::raw(" "));
@@ -998,8 +1190,14 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
     // Summary.
     line!(Line::from(vec![
         dim(th, "cpu "),
-        bold(fmt::pct(d.cpu_pct), th.cpu.at(d.cpu_pct / (d.vcpus_online.max(1) * 100) as f64)),
-        dim(th, format!(" of {}/{} vCPU online   mem ", d.vcpus_online, d.vcpu_pct.len())),
+        bold(
+            fmt::pct(d.cpu_pct),
+            th.cpu.at(d.cpu_pct / (d.vcpus_online.max(1) * 100) as f64)
+        ),
+        dim(
+            th,
+            format!(" of {}/{} vCPU online   mem ", d.vcpus_online, d.vcpu_pct.len())
+        ),
         bold(fmt::bytes(d.mem as f64), th.mem.at(0.7)),
         dim(th, format!(" / {}", fmt::bytes(d.max_mem as f64))),
     ]));
@@ -1009,7 +1207,13 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
     if y + gh <= bottom {
         let data = hist.map(|h| h.cpu.tail(w * 2)).unwrap_or_default();
         let cap = (d.vcpus_online.max(1) * 100) as f64;
-        area_graph(buf, Rect::new(inner.x, y, inner.width, gh), &data, cap, Paint::Height(&th.cpu));
+        area_graph(
+            buf,
+            Rect::new(inner.x, y, inner.width, gh),
+            &data,
+            cap,
+            Paint::Height(&th.cpu),
+        );
         y += gh;
     }
 
@@ -1023,7 +1227,10 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
             let i = ci * per_row + k;
             sp.push(dim(th, format!("v{i:<2} ")));
             sp.extend(meter(v / 100.0, cw - 11, &th.cpu, th.meter_empty));
-            sp.push(Span::styled(format!("{:>5.0}%  ", v), Style::new().fg(th.cpu.at(v / 100.0))));
+            sp.push(Span::styled(
+                format!("{:>5.0}%  ", v),
+                Style::new().fg(th.cpu.at(v / 100.0)),
+            ));
         }
         line!(Line::from(sp));
     }
@@ -1042,12 +1249,30 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
             line!(Line::from(vec![
                 Span::styled(format!("{:<6}", v.name), Style::new().fg(th.fg)),
                 dim(th, format!("{:<9}", v.kind.map(|k| k.label()).unwrap_or("?"))),
-                Span::styled(format!("{:>7}", fmt::count(v.rd_iops)), Style::new().fg(th.rd.at(1.0))),
-                Span::styled(format!("{:>7}", fmt::count(v.wr_iops)), Style::new().fg(th.wr.at(1.0))),
-                Span::styled(format!("{:>8}", fmt::rate(v.rd_bps)), Style::new().fg(th.rd.at(1.0))),
-                Span::styled(format!("{:>8}", fmt::rate(v.wr_bps)), Style::new().fg(th.wr.at(1.0))),
-                Span::styled(format!("{:>8}", fmt::lat(v.rd_lat_us)), Style::new().fg(lat_color(th, v.rd_lat_us))),
-                Span::styled(format!("{:>8}", fmt::lat(v.wr_lat_us)), Style::new().fg(lat_color(th, v.wr_lat_us))),
+                Span::styled(
+                    format!("{:>7}", fmt::count(v.rd_iops)),
+                    Style::new().fg(th.rd.at(1.0))
+                ),
+                Span::styled(
+                    format!("{:>7}", fmt::count(v.wr_iops)),
+                    Style::new().fg(th.wr.at(1.0))
+                ),
+                Span::styled(
+                    format!("{:>8}", fmt::rate(v.rd_bps)),
+                    Style::new().fg(th.rd.at(1.0))
+                ),
+                Span::styled(
+                    format!("{:>8}", fmt::rate(v.wr_bps)),
+                    Style::new().fg(th.wr.at(1.0))
+                ),
+                Span::styled(
+                    format!("{:>8}", fmt::lat(v.rd_lat_us)),
+                    Style::new().fg(lat_color(th, v.rd_lat_us))
+                ),
+                Span::styled(
+                    format!("{:>8}", fmt::lat(v.wr_lat_us)),
+                    Style::new().fg(lat_color(th, v.wr_lat_us))
+                ),
                 Span::styled(
                     format!("{:>5}", v.errors),
                     Style::new().fg(if v.errors > 0 { th.bad } else { th.dim }),
@@ -1060,14 +1285,26 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
     if !d.nets.is_empty() && y + 2 <= bottom {
         line!(Line::from(dim(th, format!("{:─<w$}", "── network "))));
         line!(Line::from(Span::styled(
-            format!("{:<9}{:>9}{:>9}{:>9}{:>9}{:>8}", "vif", "rx", "tx", "rx pps", "tx pps", "err/drp"),
+            format!(
+                "{:<9}{:>9}{:>9}{:>9}{:>9}{:>8}",
+                "vif", "rx", "tx", "rx pps", "tx pps", "err/drp"
+            ),
             Style::new().fg(th.dim).add_modifier(Modifier::BOLD),
         )));
         for n in &d.nets {
             line!(Line::from(vec![
-                Span::styled(format!("{:<9}", format!("vif{}.{}", d.id, n.id)), Style::new().fg(th.fg)),
-                Span::styled(format!("{:>9}", format!("{}/s", fmt::rate(n.rx_bps))), Style::new().fg(th.rx.at(1.0))),
-                Span::styled(format!("{:>9}", format!("{}/s", fmt::rate(n.tx_bps))), Style::new().fg(th.tx.at(1.0))),
+                Span::styled(
+                    format!("{:<9}", format!("vif{}.{}", d.id, n.id)),
+                    Style::new().fg(th.fg)
+                ),
+                Span::styled(
+                    format!("{:>9}", format!("{}/s", fmt::rate(n.rx_bps))),
+                    Style::new().fg(th.rx.at(1.0))
+                ),
+                Span::styled(
+                    format!("{:>9}", format!("{}/s", fmt::rate(n.tx_bps))),
+                    Style::new().fg(th.tx.at(1.0))
+                ),
                 Span::styled(format!("{:>9}", fmt::count(n.rx_pps)), Style::new().fg(th.fg)),
                 Span::styled(format!("{:>9}", fmt::count(n.tx_pps)), Style::new().fg(th.fg)),
                 Span::styled(
@@ -1096,35 +1333,164 @@ fn help_popup(buf: &mut Buffer, th: &Theme, area: Rect) {
         ("+  -", "slower / faster refresh"),
         ("p", "pause sampling"),
         ("t  T", "cycle colour theme"),
+        ("i", "data sources (what libxenstat provides)"),
         ("esc", "close details / clear filter"),
         ("q  ctrl-c", "quit"),
     ];
-    let w = 58u16.min(area.width);
-    let h = (keys.len() as u16 + 4).min(area.height);
-    let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+    let lines = keys
+        .iter()
+        .map(|(k, what)| {
+            Line::from(vec![
+                Span::styled(format!("{k:<22}"), Style::new().fg(th.key)),
+                Span::styled(*what, Style::new().fg(th.fg)),
+            ])
+        })
+        .collect();
+    popup(buf, th, area, " help ", 62, lines);
+}
+
+/// Centered, bordered popup listing `lines`.
+fn popup(buf: &mut Buffer, th: &Theme, area: Rect, title: &'static str, width: u16, lines: Vec<Line>) {
+    let w = width.min(area.width);
+    let h = (lines.len() as u16 + 4).min(area.height);
+    let r = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
     Clear.render(r, buf);
     buf.set_style(r, Style::new().bg(th.bg));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(th.key))
-        .title_top(Line::from(vec![bold(" help ", th.title)]))
+        .title_top(Line::from(vec![bold(title, th.title)]))
         .title_bottom(Line::from(dim(th, " any key to close ")).right_aligned());
     let inner = block.inner(r);
     block.render(r, buf);
-    for (i, (k, what)) in keys.iter().enumerate() {
+    for (i, l) in lines.iter().enumerate() {
         let y = inner.y + 1 + i as u16;
         if y >= inner.y + inner.height {
             break;
         }
-        put(
-            buf,
-            inner.x + 1,
-            y,
-            inner.width.saturating_sub(2),
-            &Line::from(vec![
-                Span::styled(format!("{k:<22}"), Style::new().fg(th.key)),
-                Span::styled(*what, Style::new().fg(th.fg)),
-            ]),
-        );
+        put(buf, inner.x + 1, y, inner.width.saturating_sub(2), l);
+    }
+}
+
+fn info_popup(buf: &mut Buffer, app: &App, area: Rect) {
+    use crate::source::Avail;
+    let th = app.theme();
+    let st = &app.status;
+    let row =
+        |what: &'static str, a: Avail, fallback: &'static str, missing: &'static str, na: &'static str| {
+            let (mark, c, how) = match a {
+                Avail::Lib => ("✓", th.ok, "libxenstat"),
+                Avail::Fallback => ("◐", th.warn, fallback),
+                Avail::Missing => ("✗", th.bad, missing),
+                Avail::NotApplicable => ("·", th.dim, na),
+            };
+            Line::from(vec![
+                Span::styled(format!("{mark} "), Style::new().fg(c)),
+                Span::styled(format!("{what:<20}"), Style::new().fg(th.fg)),
+                Span::styled(how, Style::new().fg(if a == Avail::Lib { th.dim } else { c })),
+            ])
+        };
+    let lines = vec![
+        Line::from(vec![
+            dim(th, "library  "),
+            Span::styled(app.source_desc.clone(), Style::new().fg(th.fg)),
+        ]),
+        Line::from(""),
+        row(
+            "per-pCPU load",
+            st.pcpu,
+            "fallback: libxenctrl xc_getcpuinfo()",
+            "missing: host CPU estimated from domains",
+            "n/a",
+        ),
+        row(
+            "disk latency",
+            st.vbd_latency,
+            "fallback: tapdisk3 stats in /dev/shm",
+            "missing: no tapdisk3 stats readable",
+            "n/a: no tapdisk3 disks",
+        ),
+        row(
+            "network (VIFs)",
+            st.vifs,
+            "fallback: /proc/net/dev",
+            "missing",
+            "n/a",
+        ),
+        Line::from(""),
+        Line::from(dim(th, "Fallbacks fill in what this libxenstat lacks. The")),
+        Line::from(dim(th, "libxenstat patches in the xentop-ng repository")),
+        Line::from(dim(th, "(libxenstat/) provide all of it natively.")),
+    ];
+    popup(buf, th, area, " data sources ", 70, lines);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::App;
+    use crate::source::demo::{DemoConfig, DemoSource};
+    use crate::source::Source;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    use ratatui::Terminal;
+    use std::time::Duration;
+
+    fn app(cfg: &DemoConfig) -> App {
+        let mut src = DemoSource::new(cfg);
+        let hist = src.warmup(40);
+        let mut app = App::new(Box::new(src), Duration::from_secs(1), 0);
+        for s in hist {
+            app.ingest(s);
+        }
+        app.status = app.source.status();
+        app
+    }
+
+    /// Every view, at every size from absurdly small to very large, on hosts
+    /// from 1 to 1024 pCPUs, must render without panicking.
+    #[test]
+    fn renders_everywhere() {
+        let gib = 1u64 << 30;
+        let hosts = [
+            (1, gib, false),
+            (4, 16 * gib, true),
+            (16, 128 * gib, false),
+            (128, 1024 * gib, false),
+            (1024, 8192 * gib, false),
+        ];
+        let sizes = [1u16, 5, 12, 20, 24, 31, 40, 57, 80, 119, 160, 200, 300];
+        for (pcpus, mem, stock) in hosts {
+            let cfg = DemoConfig {
+                pcpus,
+                mem,
+                stock,
+                ..Default::default()
+            };
+            let mut a = app(&cfg);
+            for &w in &sizes {
+                for &h in sizes.iter().filter(|&&h| h <= 80) {
+                    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                    for keys in [
+                        &[][..],
+                        &[KeyCode::Down, KeyCode::Enter],
+                        &[KeyCode::Char('?')],
+                        &[KeyCode::Char('i')],
+                    ] {
+                        for k in keys {
+                            a.on_key(KeyEvent::from(*k));
+                        }
+                        term.draw(|f| super::draw(f, &mut a)).unwrap();
+                        a.help = false;
+                        a.info = false;
+                    }
+                    a.detail = false;
+                }
+            }
+        }
     }
 }

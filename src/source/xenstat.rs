@@ -6,7 +6,8 @@
 //! xentop-ng libxenstat patches are optional: when absent, the matching
 //! columns simply show "-".
 
-use super::Source;
+use super::fallback::{self, Vbd3Index, XcCpuInfo};
+use super::{Avail, DataStatus, Source};
 use crate::model::*;
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::Library;
@@ -91,6 +92,9 @@ pub struct XenstatSource {
     handle: P,
     lib_name: String,
     hostname: String,
+    /// pCPU idle fallback, opened when libxenstat lacks pcpu_idle_ns.
+    xc: Option<XcCpuInfo>,
+    status: DataStatus,
     // Keeps the function pointers above valid; declared last so it is
     // dropped after `handle` has been released in Drop.
     _lib: Library,
@@ -98,9 +102,6 @@ pub struct XenstatSource {
 
 fn candidates() -> Vec<String> {
     let mut v = Vec::new();
-    if let Ok(p) = std::env::var("XENTOP_NG_LIBXENSTAT") {
-        v.push(p);
-    }
     // Versioned names first so LD_LIBRARY_PATH overrides (which usually only
     // ship the versioned file) win over the system development symlink.
     for minor in (10..=40).rev() {
@@ -113,7 +114,10 @@ fn candidates() -> Vec<String> {
 impl XenstatSource {
     pub fn open(explicit: Option<&str>) -> Result<Self> {
         let names = match explicit {
-            Some(p) => vec![p.to_string()],
+            Some(p) => {
+                check_lib_path(p)?;
+                vec![p.to_string()]
+            }
             None => candidates(),
         };
         let mut last_err = None;
@@ -218,21 +222,55 @@ impl XenstatSource {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "xen".into());
 
+        let xc = if api.pcpu_idle_ns.is_none() {
+            XcCpuInfo::open()
+        } else {
+            None
+        };
         Ok(Self {
             api,
             handle,
             lib_name,
             hostname,
+            xc,
+            status: DataStatus::default(),
             _lib: lib,
         })
     }
+}
+
+/// `--lib` loads code into a root process. If xentop-ng is ever granted to
+/// someone through sudo, that must not become "run any .so as root": as
+/// root, only accept an absolute path to a root-owned file whose directories
+/// are all root-owned and not group/world-writable.
+fn check_lib_path(p: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let path = std::path::Path::new(p);
+    if !path.is_absolute() {
+        bail!("--lib needs an absolute path when running as root");
+    }
+    let real = std::fs::canonicalize(path).with_context(|| format!("--lib {p}"))?;
+    for a in real.ancestors() {
+        let m = std::fs::metadata(a).with_context(|| format!("--lib: {}", a.display()))?;
+        if m.uid() != 0 || m.mode() & 0o022 != 0 {
+            bail!(
+                "--lib: refusing {}: {} must be owned by root and not group/world-writable",
+                p,
+                a.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn cstr(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
     }
-    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    crate::fmt::sanitize(&unsafe { CStr::from_ptr(p) }.to_string_lossy())
 }
 
 impl Source for XenstatSource {
@@ -363,16 +401,93 @@ impl Source for XenstatSource {
             }
         };
         unsafe { (a.free_node)(node) };
+        let mut snap = snap;
+        self.fill_gaps(&mut snap);
         Ok(snap)
     }
 
     fn describe(&self) -> String {
-        let ext = match (self.api.ext.is_some(), self.api.pcpu_idle_ns.is_some()) {
-            (true, true) => " +ext",
-            (true, false) | (false, true) => " +ext(partial)",
-            _ => "",
+        self.lib_name.clone()
+    }
+
+    fn status(&self) -> DataStatus {
+        self.status.clone()
+    }
+}
+
+impl XenstatSource {
+    /// Patch over what this libxenstat lacks, and record where each class of
+    /// metrics came from.
+    fn fill_gaps(&mut self, snap: &mut Snapshot) {
+        // pCPU idle time.
+        self.status.pcpu = if snap.pcpu_idle_ns.is_some() {
+            Avail::Lib
+        } else if let Some(v) = self.xc.as_mut().and_then(|xc| xc.idle()) {
+            snap.pcpu_idle_ns = Some(v);
+            Avail::Fallback
+        } else {
+            Avail::Missing
         };
-        format!("{}{ext}", self.lib_name)
+
+        // VIFs: stock libxenstat drops them all on hosts without a Linux
+        // bridge. Rebuild any guest's VIFs from /proc/net/dev.
+        self.status.vifs = Avail::Lib;
+        if snap.domains.iter().any(|d| d.id != 0 && d.nets.is_empty()) {
+            let vifs = fallback::proc_net_vifs();
+            for d in snap.domains.iter_mut().filter(|d| d.id != 0 && d.nets.is_empty()) {
+                let mut nets: Vec<NetRaw> = vifs
+                    .iter()
+                    .filter(|((domid, _), _)| *domid == d.id)
+                    .map(|(_, n)| *n)
+                    .collect();
+                if !nets.is_empty() {
+                    nets.sort_by_key(|n| n.id);
+                    d.nets = nets;
+                    self.status.vifs = Avail::Fallback;
+                }
+            }
+        }
+
+        // tapdisk3 latency.
+        let vbd3 = |snap: &Snapshot| {
+            snap.domains
+                .iter()
+                .flat_map(|d| d.vbds.iter())
+                .filter(|v| v.kind == VbdKind::Vbd3)
+                .count()
+        };
+        let total = vbd3(snap);
+        self.status.vbd_latency = if total == 0 {
+            Avail::NotApplicable
+        } else if self.api.ext.is_some() {
+            let with_ext = snap
+                .domains
+                .iter()
+                .flat_map(|d| d.vbds.iter())
+                .filter(|v| v.ext.is_some())
+                .count();
+            if with_ext > 0 {
+                Avail::Lib
+            } else {
+                Avail::Missing
+            }
+        } else {
+            let idx = Vbd3Index::scan();
+            let mut found = 0;
+            if !idx.is_empty() {
+                for d in &mut snap.domains {
+                    for v in d.vbds.iter_mut().filter(|v| v.kind == VbdKind::Vbd3) {
+                        v.ext = idx.read(d.id, v.dev);
+                        found += v.ext.is_some() as usize;
+                    }
+                }
+            }
+            if found > 0 {
+                Avail::Fallback
+            } else {
+                Avail::Missing
+            }
+        };
     }
 }
 

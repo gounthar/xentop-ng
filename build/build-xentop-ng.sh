@@ -20,7 +20,12 @@ source "$(dirname "$0")/common.sh"
 CRATE_DIR="$(cd "${CRATE_DIR:-$PROJECT_DIR}" && pwd)"
 BIN_NAME="${BIN_NAME:-xentop-ng}"
 BIN_OUT_DIR="${BIN_OUT_DIR:-$OUT_DIR}"
+# Default: the toolchain pinned in rust-toolchain.toml.
+RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-$(sed -n 's/^channel = "\(.*\)"/\1/p' "$CRATE_DIR/rust-toolchain.toml" 2>/dev/null || true)}"
 RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-stable}"
+# rustup-init, pinned and checksummed instead of `curl sh.rustup.rs | sh`.
+RUSTUP_VERSION=1.29.1
+RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 CARGO_ARGS="${CARGO_ARGS:-}"
 TARGET_CACHE="$CACHE_DIR/target/$(basename "$CRATE_DIR")"
 
@@ -31,7 +36,7 @@ ensure_image
 
 log "Building $CRATE_DIR ($BIN_NAME) with Rust $RUST_TOOLCHAIN in $IMAGE"
 run_in_container \
-    -v "$CRATE_DIR:/crate" \
+    -v "$CRATE_DIR:/crate:ro" \
     -v "$CACHE_DIR/rustup:/opt/rustup" \
     -v "$CACHE_DIR/cargo:/opt/cargo" \
     -v "$TARGET_CACHE:/target" \
@@ -39,6 +44,8 @@ run_in_container \
     -e CARGO_HOME=/opt/cargo \
     -e CARGO_TARGET_DIR=/target \
     -e RUST_TOOLCHAIN="$RUST_TOOLCHAIN" \
+    -e RUSTUP_VERSION="$RUSTUP_VERSION" \
+    -e RUSTUP_SHA256="$RUSTUP_SHA256" \
     -e CARGO_ARGS="$CARGO_ARGS" \
     -e XENSTAT_INCLUDE_DIR=/project/build/out/include \
     -e XENSTAT_LIB_DIR=/project/build/out \
@@ -47,9 +54,11 @@ run_in_container \
     set +u; source /opt/rh/devtoolset-11/enable; set -u
     export PATH="$CARGO_HOME/bin:$PATH"
     if ! command -v rustup >/dev/null 2>&1; then
-        curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs |
-            sh -s -- -y --no-modify-path --profile minimal \
-                --default-toolchain "$RUST_TOOLCHAIN"
+        curl --proto "=https" --tlsv1.2 -sSfo /tmp/rustup-init \
+            "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"
+        echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c -
+        chmod +x /tmp/rustup-init
+        /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
     fi
     rustup toolchain install --profile minimal "$RUST_TOOLCHAIN" >/dev/null 2>&1 ||
         rustup toolchain install --profile minimal "$RUST_TOOLCHAIN"

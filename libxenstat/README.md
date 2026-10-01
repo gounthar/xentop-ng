@@ -69,3 +69,16 @@ empty.
 - Every domain ends up with zero networks, and stock `xentop` shows `NETS 0`.
 
 The fix takes the bridge branch only when a bridge was actually found.
+
+## Before submitting upstream
+
+- Add your `Signed-off-by:` (DCO) to each patch.
+- Harden the existing `read_attributes_vbd3()`. It is not ours, but sits in
+  the same path: it opens `/dev/shm/td3-<pid>/vbd-*` with plain `fopen()`.
+  Use `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, then `fstat()` for a root-owned
+  regular file of at least `sizeof(struct vbd3_stats)` bytes. That is what
+  xentop-ng's own fallback does.
+- Consider exporting a version marker (e.g. `xenstat_ext_version()`), so
+  consumers can tell the semantics apart if the accessors change during
+  review.
+

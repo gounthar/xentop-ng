@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # variables used by the scripts sourcing this
 # Shared helpers for xentop-ng build scripts (sourced, not executed).
 # Everything is built inside an XCP-ng 8.3 userland container so the
 # resulting binaries only require glibc <= 2.17.
@@ -9,7 +11,8 @@ PROJECT_DIR="$(dirname "$BUILD_DIR")"
 CACHE_DIR="$BUILD_DIR/.cache"
 OUT_DIR="$BUILD_DIR/out"
 
-BASE_IMAGE="${BASE_IMAGE:-ghcr.io/xcp-ng/xcp-ng-build-env:8.3}"
+# Pinned by digest (the multi-arch index of the 8.3 tag as of 2026-10-01).
+BASE_IMAGE="${BASE_IMAGE:-ghcr.io/xcp-ng/xcp-ng-build-env:8.3@sha256:dc386bac0b1be875ebc42c37f653955d07bf816b5e6171c0090d2f27b464c0d2}"
 
 if [ -z "${CONTAINER_ENGINE:-}" ]; then
     if command -v podman >/dev/null 2>&1; then
@@ -59,7 +62,8 @@ run_in_container() {
     "$CONTAINER_ENGINE" run --rm \
         --security-opt label=disable \
         "${user_args[@]}" \
-        -v "$PROJECT_DIR:/project" \
+        -v "$PROJECT_DIR:/project:ro" \
+        -v "$CACHE_DIR:/project/build/.cache" \
         -w /project/build \
         "${args[@]}" \
         "$IMAGE" "$@"

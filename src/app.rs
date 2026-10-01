@@ -1,6 +1,6 @@
 use crate::history::History;
 use crate::model::{self, DomRates, Rates, Snapshot};
-use crate::source::Source;
+use crate::source::{DataStatus, Source};
 use crate::theme::{Theme, THEMES};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -61,6 +61,10 @@ pub struct App {
     pub selected: Option<u32>,
     pub detail: bool,
     pub help: bool,
+    pub info: bool,
+    /// Map colours to the xterm 256-colour palette at the end of each frame.
+    pub ansi256: bool,
+    pub status: DataStatus,
     pub theme: usize,
     pub show: [bool; 4],
     pub error: Option<String>,
@@ -91,6 +95,9 @@ impl App {
             selected: None,
             detail: false,
             help: false,
+            info: false,
+            ansi256: false,
+            status: DataStatus::default(),
             theme,
             show: [true; 4],
             error: None,
@@ -117,6 +124,7 @@ impl App {
         match self.source.sample() {
             Ok(snap) => {
                 self.ingest(snap);
+                self.status = self.source.status();
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -220,8 +228,9 @@ impl App {
             }
             return;
         }
-        if self.help {
+        if self.help || self.info {
             self.help = false;
+            self.info = false;
             return;
         }
         let page = self.table_rows.height.max(1) as isize;
@@ -261,9 +270,12 @@ impl App {
             KeyCode::Char('p') => self.paused = !self.paused,
             KeyCode::Char('t') => self.theme = (self.theme + 1) % THEMES.len(),
             KeyCode::Char('T') => self.theme = (self.theme + THEMES.len() - 1) % THEMES.len(),
-            KeyCode::Char('+') | KeyCode::Char('=') => self.set_interval(self.interval.as_millis() as u64 + 250),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.set_interval(self.interval.as_millis() as u64 + 250)
+            }
             KeyCode::Char('-') => self.set_interval((self.interval.as_millis() as u64).saturating_sub(250)),
             KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::F(1) => self.help = true,
+            KeyCode::Char('i') => self.info = true,
             KeyCode::Char(c @ '1'..='4') => {
                 let i = c as usize - '1' as usize;
                 self.show[i] = !self.show[i];

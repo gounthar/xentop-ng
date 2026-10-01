@@ -136,4 +136,4 @@ for f in "$OUT_DIR/libxenstat.so.4.17.0" "$OUT_DIR/xenstat-ext-test"; do
     fi
 done
 
-log "Done: $(ls "$OUT_DIR" | tr '\n' ' ')"
+log "Done: $(cd "$OUT_DIR" && echo *)"

@@ -20,6 +20,9 @@ if [ $# -ne 1 ] || [ -z "$1" ]; then
 fi
 
 HOST="$1"
+case "$HOST" in
+    -*) echo "error: HOST must not start with '-'" >&2; exit 2 ;;
+esac
 case "$HOST" in *@*) ;; *) HOST="root@$HOST" ;; esac
 
 OUT="$(cd "$(dirname "$0")" && pwd)/out"
@@ -36,11 +39,13 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10)
 STAGE="$PREFIX/.staging.$$"
 
 echo "==> Deploying to $HOST:$PREFIX"
-ssh "${SSH_OPTS[@]}" "$HOST" "mkdir -p '$PREFIX/lib' '$PREFIX/bin' '$STAGE'"
-scp "${SSH_OPTS[@]}" -p "${files[@]}" "$HOST:$STAGE/"
+# Root-owned and not group/world-writable even if $PREFIX already existed:
+# xtop puts $PREFIX/lib on LD_LIBRARY_PATH for a program running as root.
+ssh "${SSH_OPTS[@]}" -- "$HOST" "install -d -m 0755 -o root -g root '$PREFIX' '$PREFIX/lib' '$PREFIX/bin' '$STAGE'"
+scp "${SSH_OPTS[@]}" -p -- "${files[@]}" "$HOST:$STAGE/"
 
 # Move into place atomically and write the wrapper.
-ssh "${SSH_OPTS[@]}" "$HOST" bash -s -- "$PREFIX" "$STAGE" <<'REMOTE'
+ssh "${SSH_OPTS[@]}" -- "$HOST" bash -s -- "$PREFIX" "$STAGE" <<'REMOTE'
 set -euo pipefail
 PREFIX="$1"
 STAGE="$2"

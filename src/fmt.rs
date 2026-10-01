@@ -64,18 +64,60 @@ pub fn pct(v: f64) -> String {
     }
 }
 
+/// Display columns, so wide (CJK, emoji) names don't break alignment.
+pub fn width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
 /// Truncate to `w` display columns with an ellipsis.
 pub fn trunc(s: &str, w: usize) -> String {
-    let n = s.chars().count();
-    if n <= w {
-        s.to_string()
-    } else if w == 0 {
-        String::new()
-    } else {
-        let mut t: String = s.chars().take(w - 1).collect();
-        t.push('…');
-        t
+    if width(s) <= w {
+        return s.to_string();
     }
+    if w == 0 {
+        return String::new();
+    }
+    let mut t = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > w - 1 {
+            break;
+        }
+        used += cw;
+        t.push(c);
+    }
+    t.push('…');
+    t
+}
+
+/// Truncate and pad to exactly `w` display columns.
+pub fn pad(s: &str, w: usize, right: bool) -> String {
+    let t = trunc(s, w);
+    let fill = " ".repeat(w.saturating_sub(width(&t)));
+    if right {
+        fill + &t
+    } else {
+        t + &fill
+    }
+}
+
+/// Make an untrusted string (e.g. a VM name, which toolstack users with
+/// lower privileges than dom0 root can set) safe for terminals and logs:
+/// control characters, invisible formatting and bidi overrides become '?'.
+pub fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            let invisible = matches!(c,
+                '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}');
+            if c.is_control() || invisible {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -91,5 +133,18 @@ mod tests {
         assert_eq!(lat(Some(1240.0)), "1.24ms");
         assert_eq!(count(3400.0), "3.4k");
         assert_eq!(trunc("abcdef", 4), "abc…");
+        // Wide characters count double.
+        assert_eq!(trunc("宽字符名", 5), "宽字…");
+        assert_eq!(width(&pad("宽字", 6, false)), 6);
+        assert_eq!(pad("ab", 4, true), "  ab");
+    }
+
+    #[test]
+    fn sanitizes_hostile_names() {
+        assert_eq!(sanitize("vm\x1b]0;pwned\x07"), "vm?]0;pwned?");
+        assert_eq!(sanitize("a\u{9b}b\u{7f}c"), "a?b?c");
+        assert_eq!(sanitize("\u{202E}gnp.exe"), "?gnp.exe");
+        assert_eq!(sanitize("zero\u{200B}width"), "zero?width");
+        assert_eq!(sanitize("Café 宽 ok"), "Café 宽 ok");
     }
 }

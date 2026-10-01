@@ -1,5 +1,7 @@
 # xentop-ng
 
+[![CI](https://github.com/olivierlambert/xentop-ng/actions/workflows/ci.yml/badge.svg)](https://github.com/olivierlambert/xentop-ng/actions/workflows/ci.yml)
+
 A modern, btop-inspired resource monitor for the Xen hypervisor.
 
 ![xentop-ng on a simulated 128-pCPU, 1 TiB host](docs/xentop-ng.png)
@@ -52,6 +54,7 @@ in. The fleet scales with the host you ask for:
 | `--demo-mem SIZE` | RAM (`512G`, `1T`, `1.5T`…) | 128G |
 | `--demo-load PCT` | average host CPU load to aim for | 55 |
 | `--demo-mem-use PCT` | share of RAM assigned to VMs | 80 |
+| `--demo-stock` | behave like a stock libxenstat with no fallbacks | off |
 
 Any `--demo-*` option implies `--demo`.
 
@@ -69,45 +72,88 @@ xentop-ng --demo-cpus 4 --demo-mem 16G                   # a small lab box
 xentop-ng --demo-cpus 1024 --demo-mem 8T                 # stress the heatmap
 ```
 
+## Install
+
+Download from [Releases](https://github.com/olivierlambert/xentop-ng/releases):
+
+- **XCP-ng 8.3:** `xentop-ng-<version>-xcp-ng-8.3.tar.gz`
+  ```sh
+  tar xzf xentop-ng-*-xcp-ng-8.3.tar.gz && cd xentop-ng-*-xcp-ng-8.3
+  sha256sum -c ../SHA256SUMS --ignore-missing   # optional
+  ./install.sh                                  # as root; installs to /opt/xentop-ng only
+  /opt/xentop-ng/bin/xtop
+  ```
+  The bundle includes our patched libxenstat. Only the `xtop` launcher uses
+  it; the system `xentop` and libxenstat stay untouched.
+- **Any other x86_64 Linux dom0** (glibc 2.17 or newer):
+  `xentop-ng-<version>-x86_64-linux-gnu.tar.gz` contains the binary. It uses
+  the system libxenstat, with built-in fallbacks for the gaps (below).
+
+Release archives come with `SHA256SUMS` and GitHub build provenance
+attestations (`gh attestation verify <file> --repo olivierlambert/xentop-ng`).
+
 ## Running on a Xen host
 
 xentop-ng runs in dom0 as root, like `xentop`. It loads **libxenstat at
 runtime** rather than linking it, so one binary works with any Xen release.
 
 It prefers a library found through `LD_LIBRARY_PATH`, so a patched copy can
-sit next to the system one without replacing it. Use `--lib PATH` to force a
-specific library.
+sit next to the system one without replacing it. `--lib PATH` forces a
+specific library. When running as root, that file and every directory above
+it must be root-owned and not group/world-writable.
 
-### What you get with stock vs. patched libxenstat
+### Stock libxenstat, fallbacks, and our patches
 
-| | stock libxenstat | with [our patches](libxenstat/) |
-|---|---|---|
-| Domains, vCPUs, memory, disk and network throughput/IOPS | ✓ | ✓ |
-| Per-pCPU load and heatmap | host load estimated from domain CPU time; "top domains" shown instead | ✓ measured from pCPU idle time |
-| Disk latency (tapdisk3 VBDs) | – | ✓ |
-| Disk I/O error count | error flag only | ✓ |
-| Network stats on Open vSwitch hosts (XCP-ng default) | ✗ all VIFs missing ([bug](libxenstat/README.md#0002-vifs-missing-on-open-vswitch-hosts)) | ✓ |
+Until [our libxenstat patches](libxenstat/) are upstream, xentop-ng collects
+whatever the loaded libxenstat lacks by itself:
 
-Missing metrics show `-` rather than a made-up value. blkback and qdisk disks
-have no latency counters, so they always show `-` for latency.
+| Data | stock libxenstat | xentop-ng fallback | with our patches |
+|---|---|---|---|
+| Domains, vCPUs, memory, disk and network throughput/IOPS | ✓ | | ✓ |
+| Per-pCPU load and heatmap | – | ✓ via libxenctrl `xc_getcpuinfo()` | ✓ |
+| Disk latency (tapdisk3 VBDs) | – | ✓ reads tapdisk3's stats in `/dev/shm` | ✓ |
+| Network on Open vSwitch hosts (XCP-ng default) | ✗ every VIF lost ([bug](libxenstat/README.md#0002-vifs-missing-on-open-vswitch-hosts)) | ✓ from `/proc/net/dev` | ✓ |
 
-### XCP-ng 8.3
+When something is filled in by a fallback or missing altogether, the header
+shows a discreet **◐** marker. Press **`i`** for the data sources panel,
+which says where each metric comes from. `--batch` output includes the same
+information under `"sources"`.
+
+Missing values show as `-`, never a made-up number. blkback and qdisk disks
+have no latency counters at all. Without per-pCPU data, host CPU is
+estimated from domain CPU time and labelled `est.`.
+
+### Building for XCP-ng 8.3 yourself
 
 The scripts in [`build/`](build/) do everything inside the
-`ghcr.io/xcp-ng/xcp-ng-build-env:8.3` container, so the output runs on the
-host's glibc 2.17.
+`ghcr.io/xcp-ng/xcp-ng-build-env:8.3` container, pinned by digest, so the
+output runs on the host's glibc 2.17. Every input is pinned: the Xen tag
+(checked against its commit), the XCP-ng patch queue commit, the Rust
+toolchain (`rust-toolchain.toml`) and rustup-init (by checksum).
 
 ```sh
 build/build-libxenstat.sh     # patched libxenstat.so.4.17 (XCP-ng 4.17.6 + our patches)
 build/build-xentop-ng.sh      # xentop-ng binary
-build/deploy.sh HOST          # installs to /opt/xentop-ng on HOST, nothing else touched
-ssh -t root@HOST /opt/xentop-ng/bin/xtop
+build/deploy.sh HOST          # installs to /opt/xentop-ng on HOST over ssh, nothing else touched
+dist/package.sh v0.1.0        # or: release archives in build/out/release/
 ```
 
-`xtop` is a small wrapper that puts `/opt/xentop-ng/lib` on
-`LD_LIBRARY_PATH`. The system `xentop` and libxenstat are left untouched.
-`deploy.sh` also installs `xenstat-ext-test`, which prints the raw extended
-counters for checking.
+### Security notes
+
+- xentop-ng only **reads** statistics. It doesn't start, stop or change
+  domains.
+- **VM names** can be set by toolstack users who are less privileged than
+  dom0 root. They are sanitised: control characters, bidi overrides and
+  invisible characters are replaced. Wide characters are laid out by display
+  width, and the side lists show domain IDs, so a VM named "Domain-0" can't
+  pass for the real one.
+- **Fallback files:** stats files in world-writable `/dev/shm` are only
+  trusted if they and their directory are root-owned, opened without
+  following symlinks, and belong to a live tapdisk.
+- **sudo:** don't grant xentop-ng to other users through `sudo`. If you do
+  anyway, `--lib` only accepts root-owned files in root-owned directories.
+
+Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## Keys
 
@@ -124,8 +170,16 @@ counters for checking.
 | `+` `-` | slower / faster refresh |
 | `p` | pause |
 | `t` `T` | cycle themes |
+| `i` | data sources: what libxenstat provides, what comes from fallbacks |
 | `?` | help |
 | `q` | quit |
+
+## Other options
+
+- `--colors 256`: for terminals without 24-bit colour. This is the default
+  on the Linux console.
+- `--theme NAME`: start with a given theme.
+- `-d SECS`: refresh interval.
 
 ## Batch mode
 
@@ -142,12 +196,15 @@ handy next to a benchmark run.
 ```
 src/
   source/xenstat.rs   libxenstat binding (dlopen, optional extended symbols)
+  source/fallback.rs  collectors for what the loaded libxenstat lacks
   source/demo.rs      simulated host
   model.rs            raw counters → per-interval rates
   history.rs          ring buffers behind the graphs
   ui/                 layout, boxes, braille graphs, meters, heatmap
 libxenstat/           libxenstat patches: XCP-ng 4.17 and upstream versions
 build/                container builds for XCP-ng and deploy script
+dist/                 release packaging and the XCP-ng installer
+.github/workflows/    CI (fmt, clippy, tests, MSRV, cargo-deny, shellcheck) and releases
 docs/                 screenshots and the tools that generate them
 ```
 
