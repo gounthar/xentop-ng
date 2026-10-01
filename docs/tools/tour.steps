@@ -1,0 +1,8 @@
+# Tour used for docs/xentop-ng.gif (see record.sh).
+5           # live graphs on a 128-pCPU host
+2 j j j     # select a domain
+5 Enter     # its details: vCPUs, disks with latency, VIFs
+1 Escape
+3 t         # another theme
+3 5         # domains only
+2 5         # boxes back

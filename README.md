@@ -4,7 +4,10 @@
 
 A modern, btop-inspired resource monitor for the Xen hypervisor.
 
-![xentop-ng on a simulated 128-pCPU, 1 TiB host](docs/xentop-ng.png)
+![xentop-ng tour: live graphs, domain details, themes, domains-only view](docs/xentop-ng.gif)
+
+<sub>Simulated 128-pCPU, 1 TiB host (`--demo-cpus 128 --demo-mem 1T`).
+[Full-size screenshot](docs/xentop-ng.png).</sub>
 
 `xentop` shows cumulative counters in a fixed ncurses table. xentop-ng shows
 what is happening **now**: rates per interval, history graphs, per-pCPU load,
@@ -29,6 +32,8 @@ per disk and per network interface.
 - **Domain details** (`⏎`): per-vCPU load, per-disk IOPS/throughput/latency,
   per-vif traffic, packets and errors.
 - **Themes**: `btop`, `xcp-ng`, `dracula`, `gruvbox`.
+- **Domains only**: `5` (or `--domains-only`) hides every other box; `5`
+  again brings them back.
 - **Mouse**: click to select, double-click for details, wheel to scroll.
 - **Batch mode**: one JSON object per interval, for scripts and benchmarks.
 - **Demo mode**: a simulated host of any size, no Xen needed.
@@ -66,7 +71,7 @@ Any `--demo-*` option implies `--demo`.
   256 GiB database VM per TiB of RAM from 512 GiB up.
 
 ```sh
-xentop-ng --demo-cpus 128 --demo-mem 1T                  # the screenshot above
+xentop-ng --demo-cpus 128 --demo-mem 1T                  # the tour above
 xentop-ng --demo-cpus 256 --demo-mem 2T --demo-load 85   # a busy large host
 xentop-ng --demo-cpus 4 --demo-mem 16G                   # a small lab box
 xentop-ng --demo-cpus 1024 --demo-mem 8T                 # stress the heatmap
@@ -209,8 +214,14 @@ dist/                 release packaging and the XCP-ng installer
 docs/                 screenshots and the tools that generate them
 ```
 
-Screenshots are generated from the demo:
-`docs/tools/screenshot.sh docs/xentop-ng.png 200x56 "" -- --demo-cpus 128 --demo-mem 1T`.
+Screenshots and the animated tour are generated from the demo, so they can
+be refreshed after any UI change:
+
+```sh
+docs/tools/screenshot.sh docs/xentop-ng.png 200x56 "" -- --demo-cpus 128 --demo-mem 1T
+docs/tools/screenshot.sh docs/detail.png 160x46 "j j j Enter" -- --demo-cpus 32 --demo-mem 256G --theme xcp-ng
+docs/tools/record.sh docs/xentop-ng.gif 160x45 docs/tools/tour.steps -- --demo-cpus 128 --demo-mem 1T
+```
 
 Ideas and possible next steps are in [IDEAS.md](IDEAS.md).
 
