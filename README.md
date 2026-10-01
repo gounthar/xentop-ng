@@ -36,11 +36,13 @@ per disk and per network interface.
   many.
 - **Domain details** (`⏎`): per-vCPU load and steal, memory history,
   per-disk IOPS/throughput/latency, per-vif traffic, packets and errors. On
-  XCP-ng: the VM UUID, each disk's SR and VDI, and the balloon target when
-  it differs from current memory.
+  XCP-ng: the VM UUID, each disk's SR and VDI (by name, through xapi), the
+  network behind each VIF, and the balloon target when it differs from
+  current memory.
 - **Storage repositories** (`v`): the disk box switches to per-SR totals
-  (IOPS, throughput, read/write latency, the VM doing most of the I/O) and
-  the busiest disks. It answers "which SR is slow, and who is hammering it?".
+  (IOPS, throughput, read/write latency, the VM doing most of the I/O; SRs
+  by name and exact type on XCP-ng) and the busiest disks. It answers
+  "which SR is slow, and who is hammering it?".
   Rows are ranked by IOPS averaged over about 10 s, and only swap places
   on a clear change, so they stay put long enough to read. An IOPS trend
   per row shows the last samples (one bar each, as many as fit), each bar
@@ -60,7 +62,9 @@ per disk and per network interface.
   [so existing scripts keep working](#drop-in-replacement-for-xentop).
 - **Demo mode**: a simulated host of any size, no Xen needed.
 
-![Domain details, xcp-ng theme](docs/detail.png)
+![Per-SR view: SR names and types, IOPS trend coloured by latency, busiest disks](docs/sr-view.png)
+
+![Domain details, xcp-ng theme: disks with their SR and VDI names, VIF networks](docs/detail.png)
 
 ## Try it: demo mode
 
@@ -453,12 +457,14 @@ tests/xentop/         xentop fixtures, golden outputs and the harness that makes
 ```
 
 Screenshots and the animated tour are generated from the demo, so they can
-be refreshed after any UI change:
+be refreshed after any UI change (`--no-config` keeps your own preferences
+out of them):
 
 ```sh
-docs/tools/screenshot.sh docs/xentop-ng.png 200x56 "" -- --demo-cpus 128 --demo-mem 1T
-docs/tools/screenshot.sh docs/detail.png 160x46 "j j j Enter" -- --demo-cpus 32 --demo-mem 256G --theme xcp-ng
-docs/tools/record.sh docs/xentop-ng.gif 160x45 docs/tools/tour.steps -- --demo-cpus 128 --demo-mem 1T
+docs/tools/screenshot.sh docs/xentop-ng.png 200x56 "" -- --demo-cpus 128 --demo-mem 1T --no-config
+docs/tools/screenshot.sh docs/detail.png 160x46 "m Enter" -- --demo-cpus 32 --demo-mem 256G --theme xcp-ng --no-config
+docs/tools/screenshot.sh docs/sr-view.png 150x36 "1 2 3 v" -- --demo-cpus 32 --demo-mem 256G --no-config
+docs/tools/record.sh docs/xentop-ng.gif 160x45 docs/tools/tour.steps -- --demo-cpus 128 --demo-mem 1T --no-config
 ```
 
 Ideas and possible next steps are in [IDEAS.md](IDEAS.md).
