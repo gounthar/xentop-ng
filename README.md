@@ -78,8 +78,8 @@ Download from [Releases](https://github.com/olivierlambert/xentop-ng/releases):
 
 - **XCP-ng 8.3:** `xentop-ng-<version>-xcp-ng-8.3.tar.gz`
   ```sh
+  grep xcp-ng-8.3 SHA256SUMS | sha256sum -c -   # optional
   tar xzf xentop-ng-*-xcp-ng-8.3.tar.gz && cd xentop-ng-*-xcp-ng-8.3
-  sha256sum -c ../SHA256SUMS --ignore-missing   # optional
   ./install.sh                                  # as root; installs to /opt/xentop-ng only
   /opt/xentop-ng/bin/xtop
   ```
