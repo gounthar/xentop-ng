@@ -1,6 +1,6 @@
 [package]
 name = "xentop-ng"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A modern, btop-inspired resource monitor for the Xen hypervisor"
 license = "GPL-2.0-only"
