@@ -60,10 +60,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if !mid_on {
         mid_h = 0;
     }
-    // Details stacked under the list need the room more than net/disk do.
+    // Details stacked under the list need the room more than the graph
+    // boxes. Drop the net/disk row, unless the SR view (`v`) is on: then
+    // the disk box is what was asked for, and the cpu/mem row goes instead.
     let stacked_detail = app.detail && app.selected.is_some() && area.width < 160;
     if stacked_detail && h < 45 {
-        mid_h = 0;
+        if app.sr_view && mid_h > 0 {
+            top_h = 0;
+        } else {
+            mid_h = 0;
+        }
     }
     // Few domains: hand the list's unused rows to the graph boxes.
     if !app.detail && h >= 24 {
@@ -1180,6 +1186,7 @@ const HINTS: &[(&str, &str)] = &[
     ("o", "columns"),
     ("↑↓", "select"),
     ("1-5", "boxes"),
+    ("v", "SRs"),
     ("t", "theme"),
     ("r", "reverse"),
     ("+-", "speed"),
