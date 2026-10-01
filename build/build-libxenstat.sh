@@ -58,7 +58,14 @@ git -C "$CACHE_DIR/xcpng-xen-rpm" -c advice.detachedHead=false checkout -q "$XCP
 
 log "Exporting pristine source tree"
 SRC="$CACHE_DIR/src/xen-4.17.6"
-rm -rf "$SRC"
+# Files written inside a rootless container can belong to sub-UIDs the host
+# user can't delete; a half-removed tree would then mix old build objects
+# with newly patched sources.
+rm -rf "$SRC" 2>/dev/null || { [ "$CONTAINER_ENGINE" = podman ] && podman unshare rm -rf "$SRC"; }
+if [ -e "$SRC" ]; then
+    echo "error: could not remove $SRC" >&2
+    exit 1
+fi
 mkdir -p "$SRC"
 git -C "$CACHE_DIR/xen.git" archive "$XEN_TAG" | tar -x -C "$SRC"
 

@@ -49,8 +49,11 @@ per disk and per network interface.
   are kept in a [config file](#configuration).
 - **Domains only**: `5` (or `--domains-only`) hides every other box; `5`
   again brings them back.
-- **Mouse**: click to select, double-click for details, wheel to scroll.
+- **Mouse**: click to select or to sort by a column, double-click for
+  details, wheel to scroll.
 - **Batch mode**: one JSON object per interval, for scripts and benchmarks.
+- **Drop-in for `xentop`**: same command line, same `xentop -b` text output,
+  [so existing scripts keep working](#drop-in-replacement-for-xentop).
 - **Demo mode**: a simulated host of any size, no Xen needed.
 
 ![Domain details, xcp-ng theme](docs/detail.png)
@@ -134,6 +137,7 @@ whatever the loaded libxenstat lacks by itself:
 | Disk latency (tapdisk3 VBDs) | – | ✓ reads tapdisk3's stats in `/dev/shm` | ✓ |
 | Network on Open vSwitch hosts (XCP-ng default) | ✗ every VIF lost ([bug](libxenstat/README.md#0002-vifs-missing-on-open-vswitch-hosts)) | ✓ from `/proc/net/dev` | ✓ |
 | VM UUID, balloon target, disk → SR/VDI (or backing path) | – | ✓ from xenstore | ✓ from xenstore |
+| Steal time | – | ◐ per domain only, XCP-ng/XenServer hypervisors (their `xc_get_runstate_info_ext()`) | ✓ per vCPU, **with the hypervisor patch too** (below) |
 
 Storage mapping never comes from libxenstat. xentop-ng reads it from
 xenstore through `libxenstore.so` (also loaded at runtime): each domain's
@@ -142,10 +146,11 @@ xenstore through `libxenstore.so` (also loaded at runtime): each domain's
 from where `/dev/sm/phy/<sr>/<vdi>` points and `/proc/mounts`. SR and VDI
 *names* live in xapi only, so the UI shows UUIDs (the first block in
 tables, in full in the details and in `--batch`).
-| Steal time | – | ◐ per domain only, XCP-ng/XenServer hypervisors (their `xc_get_runstate_info_ext()`) | ✓ per vCPU, **with the hypervisor patch too** (below) |
 
-When something is filled in by a fallback or missing altogether, the header
-shows a discreet **◐** marker. Press **`i`** for the data sources panel,
+When per-pCPU load, disk latency or VIFs come from a fallback or are
+missing, the header shows a discreet **◐** marker. Storage mapping and steal
+time don't count: the first always comes from xenstore, the second depends
+on the hypervisor. Press **`i`** for the data sources panel,
 which says where each metric comes from. `--batch` output includes the same
 information under `"sources"`.
 
@@ -167,9 +172,8 @@ per-domain figure on XCP-ng.
 - **Per vCPU and per domain**: share of the interval each vCPU spent
   runnable but not running, averaged over the domain's online vCPUs. That
   is what `st` shows in a Linux guest's `top`.
-- **Host** (top line of the cpu box): runnable / (running + runnable) over
-  all domains: the share of the CPU time vCPUs asked for that they had to
-  wait for.
+- **Host** (top line of the cpu box): the same figure, averaged over every
+  vCPU that reports it.
 
 The data sources panel (`i`) and `--batch` (`"sources"`) say where the
 figure comes from. Steal isn't counted in the header's ◐ marker, since it
@@ -187,7 +191,7 @@ toolchain (`rust-toolchain.toml`) and rustup-init (by checksum).
 build/build-libxenstat.sh     # patched libxenstat.so.4.17 (XCP-ng 4.17.6 + our patches)
 build/build-xentop-ng.sh      # xentop-ng binary
 build/deploy.sh HOST          # installs to /opt/xentop-ng on HOST over ssh, nothing else touched
-dist/package.sh v0.1.0        # or: release archives in build/out/release/
+dist/package.sh vX.Y.Z        # release archives in build/out/release/
 ```
 
 These build and install user space only. The hypervisor half of steal time
@@ -284,9 +288,9 @@ columns = ["id", "name", "state", "cpu", "cpu_hist", "mem", "iops", "lat",
 hidden_columns = ["vcpu"]
 ```
 
-Column ids: `id`, `name`, `state`, `vcpu`, `cpu`, `cpu_hist`, `mem`,
-`net_rx`, `net_tx`, `disk_rd`, `disk_wr`, `iops`, `lat`. `id` and `name`
-are always shown.
+Column ids: `id`, `name`, `state`, `vcpu`, `cpu`, `cpu_hist`, `steal`,
+`mem`, `net_rx`, `net_tx`, `disk_rd`, `disk_wr`, `iops`, `lat`. `id` and
+`name` are always shown. For `sort`, `net` and `disk` mean the totals.
 
 ## Accessibility
 
@@ -303,11 +307,15 @@ are always shown.
 
 ## Other options
 
-- `--colors 256`: for terminals without 24-bit colour. This is the default
-  on the Linux console. `--colors mono`: no colour (as with `NO_COLOR`).
+- `-d SECS`: refresh interval (default 1 s).
 - `--theme NAME`: start with a given theme.
-- `-d SECS`: refresh interval.
+- `--colors 256`: for terminals without 24-bit colour; the default on the
+  Linux console. `--colors mono`: no colour (as with `NO_COLOR`).
+- `--domains-only`: start with only the domain list.
 - `--config PATH`, `--no-config`: see [Configuration](#configuration).
+- `--lib PATH`: a specific libxenstat (see [Running on a Xen host](#running-on-a-xen-host)).
+- `--xentop ARGS...`: xentop's command line (see [below](#drop-in-replacement-for-xentop)).
+- `xentop-ng --help` lists everything.
 
 ## Batch mode
 
@@ -315,9 +323,11 @@ are always shown.
 xentop-ng --batch -d 1 -n 60 > run.jsonl
 ```
 
-Each line is a JSON object with host and per-domain rates: CPU %, per-vCPU %,
-network B/s and pps, disk B/s, IOPS and latency, per VBD and per VIF. This is
-handy next to a benchmark run. Domains carry `vm_uuid` and `mem_target`
+Each line is a JSON object with host and per-domain rates: CPU %, per-vCPU
+%, steal % (host, domain, per vCPU), network B/s and pps, disk B/s, IOPS and
+latency, per VBD and per VIF. This is handy next to a benchmark run.
+`"sources"` says where each class of data came from (see the data sources
+panel). Domains carry `vm_uuid` and `mem_target`
 (bytes), VBDs `sr`, `vdi`, `sr_kind` and `path`, and `srs` holds the per-SR
 totals (full UUIDs, latency, top VM by IOPS). Unknown values are `null`.
 
@@ -395,9 +405,6 @@ Known differences:
 - **`-p`, `-z` and the `--help` text follow upstream xentop (Xen 4.21).**
   XCP-ng 8.3's xentop 4.17 rejects `-p` and `-z`, and its help text differs
   in whitespace.
-steal % (host, domain, per vCPU; `null` when unavailable), network B/s and
-pps, disk B/s, IOPS and latency, per VBD and per VIF. This is handy next to
-a benchmark run.
 
 ## Layout
 
@@ -411,9 +418,8 @@ src/
   history.rs          ring buffers behind the graphs
   config.rs           preferences file
   ui/                 layout, boxes, braille graphs, meters, heatmap
-  xentop_compat.rs    xentop command line and `xentop -b` output
   ui/columns.rs       domain table columns: one entry per column
-libxenstat/           libxenstat patches: XCP-ng 4.17 and upstream versions
+  xentop_compat.rs    xentop command line and `xentop -b` output
 libxenstat/           libxenstat (and steal-time hypervisor) patches: XCP-ng 4.17 and upstream
 build/                container builds for XCP-ng and deploy script
 dist/                 release packaging and the XCP-ng installer

@@ -217,9 +217,9 @@ pub struct HostRates {
     /// Request-weighted mean service latency across all extended VBDs (µs).
     pub disk_rd_lat_us: Option<f64>,
     pub disk_wr_lat_us: Option<f64>,
-    /// Share of the CPU time vCPUs asked for that they spent waiting for a
-    /// pCPU: runnable / (running + runnable), in % over all domains that
-    /// report steal time. `None` when no domain does.
+    /// Share of wall time vCPUs spent runnable but not running, averaged
+    /// over every vCPU that reports it (same definition as `DomRates`).
+    /// `None` when no domain reports steal time.
     pub steal_pct: Option<f64>,
 }
 
@@ -455,8 +455,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
     let (mut h_rd_us, mut h_wr_us, mut h_rd_done, mut h_wr_done) = (0u64, 0u64, 0u64, 0u64);
     let mut dom_cpu_total = 0f64;
     let mut srs: HashMap<String, SrAcc> = HashMap::new();
-    // Steal over domains that report it: (runnable ns, running ns).
-    let mut h_steal: Option<(u64, u64)> = None;
+    // Steal over domains that report it: (runnable ns, online vCPUs).
+    let mut h_steal: Option<(u64, usize)> = None;
 
     let mut domains = Vec::with_capacity(cur.domains.len());
     for dom in &cur.domains {
@@ -489,8 +489,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             r.vcpu_steal_pct = per_vcpu.iter().map(|x| x.map(|ns| pct(ns, 1))).collect();
             if let Some(ns) = dom_runnable(dom, p, &per_vcpu) {
                 r.steal_pct = Some(pct(ns, r.vcpus_online));
-                let (hr, hc) = h_steal.unwrap_or_default();
-                h_steal = Some((hr.saturating_add(ns), hc.saturating_add(d(dom.cpu_ns, p.cpu_ns))));
+                let (hr, hv) = h_steal.unwrap_or_default();
+                h_steal = Some((hr.saturating_add(ns), hv + r.vcpus_online.max(1)));
             }
         } else {
             r.vcpu_pct = vec![0.0; dom.vcpus.len()];
@@ -599,14 +599,13 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
     }
     host.disk_rd_lat_us = lat(h_rd_us, h_rd_done);
     host.disk_wr_lat_us = lat(h_wr_us, h_wr_done);
-    host.steal_pct = h_steal.map(|(run, cpu)| {
-        let demand = run.saturating_add(cpu);
-        if demand == 0 {
-            0.0
-        } else {
-            run as f64 / demand as f64 * 100.0
-        }
-    });
+    // Same definition as the per-domain figure (and as `st` in a Linux
+    // guest): share of wall time spent runnable, averaged over every vCPU
+    // that reports it. A share-of-demand ratio looks dramatic on idle hosts
+    // (a few ms of wake-up latency against a few ms of work) and would not
+    // match the STEAL column.
+    host.steal_pct =
+        h_steal.map(|(run, vcpus)| (run as f64 / (dt_ns * vcpus.max(1) as f64) * 100.0).min(100.0));
 
     match (&prev.pcpu_idle_ns, &cur.pcpu_idle_ns) {
         (Some(pi), Some(ci)) if !ci.is_empty() => {
@@ -854,8 +853,8 @@ mod rate_tests {
         assert!((v[0] - 10.0).abs() < 1e-9 && (v[1] - 30.0).abs() < 1e-9, "{v:?}");
         // Mean over the two vCPUs.
         assert!((d.steal_pct.unwrap() - 20.0).abs() < 1e-9);
-        // Host: 400 ms waited out of 1400 ms asked for.
-        assert!((r.host.steal_pct.unwrap() - 400.0 / 1400.0 * 100.0).abs() < 1e-9);
+        // Host: same definition, over every reporting vCPU.
+        assert!((r.host.steal_pct.unwrap() - 20.0).abs() < 1e-9);
     }
 
     #[test]
@@ -894,7 +893,7 @@ mod rate_tests {
         // 200 ms over 2 vCPUs x 1 s.
         assert!((d.steal_pct.unwrap() - 10.0).abs() < 1e-9);
         assert_eq!(d.vcpu_steal_pct, vec![None, None]);
-        assert!((r.host.steal_pct.unwrap() - 25.0).abs() < 1e-9);
+        assert!((r.host.steal_pct.unwrap() - 10.0).abs() < 1e-9);
     }
 
     #[test]
