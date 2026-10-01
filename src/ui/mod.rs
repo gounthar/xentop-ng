@@ -323,6 +323,15 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     lbl.push(dim(th, "   domains "));
     lbl.push(Span::styled(fmt::pct(dom_sum), Style::new().fg(th.fg)));
     lbl.push(dim(th, format!(" of {}00%", h.num_cpus)));
+    // Steal: share of the CPU time vCPUs wanted that they spent waiting.
+    // Only when known (the domain list shows "-" otherwise) and if it fits.
+    if let Some(st) = h.steal_pct {
+        let v = fmt::pct(st);
+        if Line::from(lbl.clone()).width() + 9 + v.len() <= graph.width as usize {
+            lbl.push(dim(th, "   steal "));
+            lbl.push(Span::styled(v, Style::new().fg(steal_color(th, Some(st)))));
+        }
+    }
     put(buf, graph.x, graph.y, graph.width, &Line::from(lbl));
 
     let gx = inner.x + gx_w + 1;
@@ -697,6 +706,14 @@ fn lat_color(th: &Theme, us: Option<f64>) -> Color {
     }
 }
 
+/// Steal colour: dim when negligible, then green to red, red from 20%.
+fn steal_color(th: &Theme, pct: Option<f64>) -> Color {
+    match pct {
+        Some(p) if p >= 0.5 => th.cpu.at((p / 20.0).max(0.15)),
+        _ => th.dim,
+    }
+}
+
 fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     let th = app.theme();
     let h = &r.host;
@@ -825,6 +842,7 @@ enum Col {
     Vcpu,
     Cpu,
     CpuHist,
+    Steal,
     Mem,
     NetRx,
     NetTx,
@@ -843,6 +861,7 @@ impl Col {
             Col::Vcpu => "VCPU",
             Col::Cpu => "CPU",
             Col::CpuHist => "CPU HISTORY",
+            Col::Steal => "STEAL",
             Col::Mem => "MEM",
             Col::NetRx => "NET ▼",
             Col::NetTx => "NET ▲",
@@ -861,6 +880,7 @@ impl Col {
             Col::NetRx => SortKey::Net,
             Col::DiskRd => SortKey::Disk,
             Col::Lat => SortKey::Lat,
+            Col::Steal => SortKey::Steal,
             _ => return None,
         })
     }
@@ -880,6 +900,7 @@ fn layout_cols(width: u16) -> Vec<(Col, usize)> {
         (Col::Vcpu, 5, 7),
         (Col::Cpu, 16, 0),
         (Col::CpuHist, 12, 5),
+        (Col::Steal, 6, 4),
         (Col::Mem, 7, 0),
         (Col::NetRx, 8, 1),
         (Col::NetTx, 8, 1),
@@ -1134,6 +1155,10 @@ fn dom_row(app: &App, th: &Theme, d: &DomRates, cols: &[(Col, usize)]) -> Line<'
                     Style::new().fg(lat_color(th, l)),
                 ));
             }
+            Col::Steal => sp.push(Span::styled(
+                pad(d.steal_pct.map(fmt::pct).unwrap_or_else(|| "-".into()), w, true),
+                Style::new().fg(steal_color(th, d.steal_pct)),
+            )),
         }
         sp.push(Span::raw(" "));
     }
@@ -1143,9 +1168,19 @@ fn dom_row(app: &App, th: &Theme, d: &DomRates, cols: &[(Col, usize)]) -> Line<'
 // ---------------------------------------------------------------------------
 // Domain detail
 
+/// Width of one vCPU cell in the detail panel: label, meter, load, and
+/// steal when the hypervisor reports it per vCPU.
+fn vcpu_cell_w(d: &DomRates) -> usize {
+    if d.vcpu_steal_pct.iter().any(Option::is_some) {
+        31
+    } else {
+        23
+    }
+}
+
 /// Rows the detail panel wants when stacked (borders included).
 fn detail_height(d: &DomRates, width: u16) -> u16 {
-    let per_row = ((width as usize).saturating_sub(2) / 23).max(1);
+    let per_row = ((width as usize).saturating_sub(2) / vcpu_cell_w(d)).max(1);
     let section = |n: usize| if n > 0 { 2 + n } else { 0 };
     (2 + 1 + 3 + d.vcpu_pct.len().div_ceil(per_row) + section(d.vbds.len()) + section(d.nets.len())) as u16
 }
@@ -1202,6 +1237,11 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
         ),
         bold(fmt::bytes(d.mem as f64), th.mem.at(0.7)),
         dim(th, format!(" / {}", fmt::bytes(d.max_mem as f64))),
+        dim(th, "   steal "),
+        Span::styled(
+            d.steal_pct.map(fmt::pct).unwrap_or_else(|| "-".into()),
+            Style::new().fg(steal_color(th, d.steal_pct)),
+        ),
     ]));
 
     // CPU history graph.
@@ -1219,8 +1259,9 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
         y += gh;
     }
 
-    // vCPUs.
-    let cw = 23usize;
+    // vCPUs, with their steal time when known.
+    let cw = vcpu_cell_w(d);
+    let with_steal = cw > 23;
     let per_row = (w / cw).max(1);
     for chunk in d.vcpu_pct.chunks(per_row).enumerate() {
         let (ci, vals) = chunk;
@@ -1228,11 +1269,20 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
         for (k, v) in vals.iter().enumerate() {
             let i = ci * per_row + k;
             sp.push(dim(th, format!("v{i:<2} ")));
-            sp.extend(meter(v / 100.0, cw - 11, &th.cpu, th.meter_empty));
+            sp.extend(meter(v / 100.0, 12, &th.cpu, th.meter_empty));
             sp.push(Span::styled(
-                format!("{:>5.0}%  ", v),
+                format!("{:>5.0}%", v),
                 Style::new().fg(th.cpu.at(v / 100.0)),
             ));
+            if with_steal {
+                let st = d.vcpu_steal_pct.get(i).copied().flatten();
+                sp.push(dim(th, " st"));
+                sp.push(Span::styled(
+                    format!("{:>5}", st.map(fmt::pct).unwrap_or_else(|| "-".into())),
+                    Style::new().fg(steal_color(th, st)),
+                ));
+            }
+            sp.push(Span::raw("  "));
         }
         line!(Line::from(sp));
     }
@@ -1425,10 +1475,18 @@ fn info_popup(buf: &mut Buffer, app: &App, area: Rect) {
             "missing",
             "n/a",
         ),
+        row(
+            "steal time",
+            st.steal,
+            "fallback: XCP-ng domain runstate, no vCPU",
+            "missing: needs hypervisor patch (0003)",
+            "n/a",
+        ),
         Line::from(""),
         Line::from(dim(th, "Fallbacks fill in what this libxenstat lacks. The")),
         Line::from(dim(th, "libxenstat patches in the xentop-ng repository")),
-        Line::from(dim(th, "(libxenstat/) provide all of it natively.")),
+        Line::from(dim(th, "(libxenstat/) provide all of it natively; steal")),
+        Line::from(dim(th, "time per vCPU also needs their hypervisor patch.")),
     ];
     popup(buf, th, area, " data sources ", 70, lines);
 }

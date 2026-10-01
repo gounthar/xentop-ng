@@ -26,11 +26,15 @@ per disk and per network interface.
 - **Network and disk**: throughput graphs for traffic to/from VMs and for
   reads/writes, with IOPS and peaks.
 - **Disk latency**: read/write service time from tapdisk3, with history.
+- **Steal time**: how long vCPUs were ready to run but waited for a pCPU,
+  per domain and per vCPU. The most direct sign of an overcommitted host
+  ([needs a hypervisor patch](#steal-time-needs-a-hypervisor-patch) for the
+  per-vCPU figures).
 - **Domain list**: sortable and filterable, with CPU meter, CPU history,
-  memory, network, disk throughput, IOPS and latency. Columns adapt to the
-  terminal width.
-- **Domain details** (`⏎`): per-vCPU load, per-disk IOPS/throughput/latency,
-  per-vif traffic, packets and errors.
+  steal, memory, network, disk throughput, IOPS and latency. Columns adapt
+  to the terminal width.
+- **Domain details** (`⏎`): per-vCPU load and steal, per-disk
+  IOPS/throughput/latency, per-vif traffic, packets and errors.
 - **Themes**: `btop`, `xcp-ng`, `dracula`, `gruvbox`.
 - **Domains only**: `5` (or `--domains-only`) hides every other box; `5`
   again brings them back.
@@ -118,6 +122,7 @@ whatever the loaded libxenstat lacks by itself:
 | Per-pCPU load and heatmap | – | ✓ via libxenctrl `xc_getcpuinfo()` | ✓ |
 | Disk latency (tapdisk3 VBDs) | – | ✓ reads tapdisk3's stats in `/dev/shm` | ✓ |
 | Network on Open vSwitch hosts (XCP-ng default) | ✗ every VIF lost ([bug](libxenstat/README.md#0002-vifs-missing-on-open-vswitch-hosts)) | ✓ from `/proc/net/dev` | ✓ |
+| Steal time | – | ◐ per domain only, XCP-ng/XenServer hypervisors (their `xc_get_runstate_info_ext()`) | ✓ per vCPU, **with the hypervisor patch too** (below) |
 
 When something is filled in by a fallback or missing altogether, the header
 shows a discreet **◐** marker. Press **`i`** for the data sources panel,
@@ -127,6 +132,28 @@ information under `"sources"`.
 Missing values show as `-`, never a made-up number. blkback and qdisk disks
 have no latency counters at all. Without per-pCPU data, host CPU is
 estimated from domain CPU time and labelled `est.`.
+
+#### Steal time needs a hypervisor patch
+
+Xen keeps per-vCPU runstate times (running, runnable, blocked, offline),
+but only a guest can read its own. Patch
+[0003](libxenstat/README.md#0003-and-0004-steal-time)
+adds a domctl so dom0 can read them for any domain, and 0004 exposes them in
+libxenstat. Unlike the other patches, 0003 changes the **hypervisor**: the
+host has to run a rebuilt Xen (and so be rebooted). A patched libxenstat
+alone is harmless on a stock hypervisor; steal time then shows `-`, or the
+per-domain figure on XCP-ng.
+
+- **Per vCPU and per domain**: share of the interval each vCPU spent
+  runnable but not running, averaged over the domain's online vCPUs. That
+  is what `st` shows in a Linux guest's `top`.
+- **Host** (top line of the cpu box): runnable / (running + runnable) over
+  all domains: the share of the CPU time vCPUs asked for that they had to
+  wait for.
+
+The data sources panel (`i`) and `--batch` (`"sources"`) say where the
+figure comes from. Steal isn't counted in the header's ◐ marker, since it
+depends on the hypervisor rather than on libxenstat.
 
 ### Building for XCP-ng 8.3 yourself
 
@@ -142,6 +169,10 @@ build/build-xentop-ng.sh      # xentop-ng binary
 build/deploy.sh HOST          # installs to /opt/xentop-ng on HOST over ssh, nothing else touched
 dist/package.sh v0.1.0        # or: release archives in build/out/release/
 ```
+
+These build and install user space only. The hypervisor half of steal time
+(patch 0003) goes into XCP-ng's Xen RPM build instead; see
+[libxenstat/README.md](libxenstat/README.md#0003-and-0004-steal-time).
 
 ### Security notes
 
@@ -167,7 +198,7 @@ Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | select domain |
 | `⏎`, `space`, double-click | domain details |
 | `s` `S` / `←` `→` | next / previous sort column |
-| `c` `m` `n` `d` `l` | sort by cpu, memory, network, disk, latency |
+| `c` `m` `n` `d` `l` | sort by cpu, memory, network, disk, latency (steal: via `s`) |
 | `r` | reverse sort |
 | `0` | pin Domain-0 on top |
 | `/` or `f` | filter by name or id |
@@ -194,8 +225,9 @@ xentop-ng --batch -d 1 -n 60 > run.jsonl
 ```
 
 Each line is a JSON object with host and per-domain rates: CPU %, per-vCPU %,
-network B/s and pps, disk B/s, IOPS and latency, per VBD and per VIF. This is
-handy next to a benchmark run.
+steal % (host, domain, per vCPU; `null` when unavailable), network B/s and
+pps, disk B/s, IOPS and latency, per VBD and per VIF. This is handy next to
+a benchmark run.
 
 ## Layout
 
@@ -207,7 +239,7 @@ src/
   model.rs            raw counters → per-interval rates
   history.rs          ring buffers behind the graphs
   ui/                 layout, boxes, braille graphs, meters, heatmap
-libxenstat/           libxenstat patches: XCP-ng 4.17 and upstream versions
+libxenstat/           libxenstat (and steal-time hypervisor) patches: XCP-ng 4.17 and upstream
 build/                container builds for XCP-ng and deploy script
 dist/                 release packaging and the XCP-ng installer
 .github/workflows/    CI (fmt, clippy, tests, MSRV, cargo-deny, shellcheck) and releases

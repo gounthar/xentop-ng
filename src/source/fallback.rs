@@ -2,6 +2,9 @@
 //! libxenstat patches (see libxenstat/) are available upstream:
 //!
 //! - per-pCPU idle time via libxenctrl's xc_getcpuinfo();
+//! - per-domain steal time via XCP-ng's libxenctrl
+//!   xc_get_runstate_info_ext() (whole-domain runstate, XenServer patch
+//!   queue), when the hypervisor lacks XEN_DOMCTL_get_vcpu_runstate;
 //! - VIF counters from /proc/net/dev (stock libxenstat loses every VIF on
 //!   hosts without a Linux bridge, e.g. Open vSwitch);
 //! - tapdisk3 service-time counters from its shared-memory stats files.
@@ -32,24 +35,29 @@ pub struct XcCpuInfo {
     _lib: Library,
 }
 
+type XcOpen = unsafe extern "C" fn(*mut c_void, *mut c_void, c_uint) -> *mut c_void;
+
+fn libxenctrl() -> Option<Library> {
+    let names: Vec<String> = (10..=40)
+        .rev()
+        .map(|m| format!("libxenctrl.so.4.{m}"))
+        .chain(["libxenctrl.so".to_string()])
+        .collect();
+    // Prefer the libxenctrl that libxenstat itself pulled in, so both
+    // talk to the hypervisor through the same version.
+    let loaded = names.iter().find_map(|n| {
+        unsafe { libloading::os::unix::Library::open(Some(n), libc::RTLD_NOW | libc::RTLD_NOLOAD) }
+            .ok()
+            .map(Library::from)
+    });
+    loaded.or_else(|| names.iter().find_map(|n| unsafe { Library::new(n) }.ok()))
+}
+
 impl XcCpuInfo {
     pub fn open() -> Option<Self> {
-        let names: Vec<String> = (10..=40)
-            .rev()
-            .map(|m| format!("libxenctrl.so.4.{m}"))
-            .chain(["libxenctrl.so".to_string()])
-            .collect();
-        // Prefer the libxenctrl that libxenstat itself pulled in, so both
-        // talk to the hypervisor through the same version.
-        let loaded = names.iter().find_map(|n| {
-            unsafe { libloading::os::unix::Library::open(Some(n), libc::RTLD_NOW | libc::RTLD_NOLOAD) }
-                .ok()
-                .map(Library::from)
-        });
-        let lib = loaded.or_else(|| names.iter().find_map(|n| unsafe { Library::new(n) }.ok()))?;
+        let lib = libxenctrl()?;
         unsafe {
-            type Open = unsafe extern "C" fn(*mut c_void, *mut c_void, c_uint) -> *mut c_void;
-            let open: Open = *lib.get(b"xc_interface_open\0").ok()?;
+            let open: XcOpen = *lib.get(b"xc_interface_open\0").ok()?;
             let getcpuinfo = *lib.get(b"xc_getcpuinfo\0").ok()?;
             let close = *lib.get(b"xc_interface_close\0").ok()?;
             let xch = open(std::ptr::null_mut(), std::ptr::null_mut(), 0);
@@ -87,6 +95,81 @@ impl XcCpuInfo {
 }
 
 impl Drop for XcCpuInfo {
+    fn drop(&mut self) {
+        unsafe { (self.close)(self.xch) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Domain steal time (XCP-ng / XenServer hypervisors)
+
+/// XEN_DOMCTL_get_runstate_info, from XenServer's patch queue (shipped by
+/// XCP-ng and XenServer, not upstream).
+const DOMCTL_GET_RUNSTATE_INFO: u32 = 98;
+/// Room for a `struct xen_domctl` (144 bytes on x86_64) with margin.
+const DOMCTL_WORDS: usize = 64;
+/// u64 index of `u.domain_runstate.runnable` in `struct xen_domctl`:
+/// 16 bytes of header, then state, missed_changes (u32 each),
+/// state_entry_time and time[6] (u64 each) before it.
+const RUNNABLE_WORD: usize = (16 + 8 + 8 + 6 * 8) / 8;
+
+/// Whole-domain runstate via XCP-ng's libxenctrl, which has
+/// `xc_get_runstate_info_ext()`. It reports the domain's runnable time as
+/// the average over its vCPUs, so per-vCPU detail is not available.
+pub struct XcDomRunstate {
+    xch: *mut c_void,
+    get: unsafe extern "C" fn(*mut c_void, u32, *mut c_void) -> c_int,
+    close: unsafe extern "C" fn(*mut c_void) -> c_int,
+    buf: Box<[u64; DOMCTL_WORDS]>,
+    _lib: Library,
+}
+
+impl XcDomRunstate {
+    pub fn open() -> Option<Self> {
+        if !cfg!(all(target_arch = "x86_64", target_endian = "little")) {
+            return None;
+        }
+        let lib = libxenctrl()?;
+        unsafe {
+            let open: XcOpen = *lib.get(b"xc_interface_open\0").ok()?;
+            let get = *lib.get(b"xc_get_runstate_info_ext\0").ok()?;
+            let close = *lib.get(b"xc_interface_close\0").ok()?;
+            let xch = open(std::ptr::null_mut(), std::ptr::null_mut(), 0);
+            if xch.is_null() {
+                return None;
+            }
+            Some(XcDomRunstate {
+                xch,
+                get,
+                close,
+                buf: Box::new([0; DOMCTL_WORDS]),
+                _lib: lib,
+            })
+        }
+    }
+
+    /// Runnable time of `domid` summed over its `nr_vcpus` vCPUs (ns).
+    pub fn runnable_ns(&mut self, domid: u32, nr_vcpus: usize) -> Option<u64> {
+        self.buf.fill(0);
+        // SAFETY: buf is larger than struct xen_domctl and 8-byte aligned;
+        // the call writes at most one struct xen_domctl into it.
+        let rc = unsafe { (self.get)(self.xch, domid, self.buf.as_mut_ptr().cast()) };
+        parse_dom_runstate(rc, &self.buf, domid, nr_vcpus)
+    }
+}
+
+/// Check the returned domctl really is ours (cmd and domain echoed back)
+/// before trusting the offsets, then undo the per-vCPU averaging.
+fn parse_dom_runstate(rc: c_int, buf: &[u64; DOMCTL_WORDS], domid: u32, nr_vcpus: usize) -> Option<u64> {
+    let cmd = buf[0] as u32;
+    let dom = buf[1] as u16;
+    if rc != 0 || cmd != DOMCTL_GET_RUNSTATE_INFO || dom as u32 != domid {
+        return None;
+    }
+    Some(buf[RUNNABLE_WORD].saturating_mul(nr_vcpus as u64))
+}
+
+impl Drop for XcDomRunstate {
     fn drop(&mut self) {
         unsafe { (self.close)(self.xch) };
     }
@@ -322,6 +405,20 @@ vifbogus: 1 2 3 4 0 0 0 0 5 6 7 8 0 0 0 0
         ] {
             assert_eq!(vbd_key(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn dom_runstate_layout() {
+        let mut b = [0u64; DOMCTL_WORDS];
+        b[0] = DOMCTL_GET_RUNSTATE_INFO as u64 | (0x15 << 32); // cmd, interface_version
+        b[1] = 7; // domain
+        b[RUNNABLE_WORD] = 1_000;
+        assert_eq!(RUNNABLE_WORD, 10);
+        assert_eq!(parse_dom_runstate(0, &b, 7, 4), Some(4_000));
+        assert_eq!(parse_dom_runstate(-1, &b, 7, 4), None);
+        assert_eq!(parse_dom_runstate(0, &b, 8, 4), None);
+        b[0] = 99;
+        assert_eq!(parse_dom_runstate(0, &b, 7, 4), None);
     }
 
     #[test]

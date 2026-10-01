@@ -56,12 +56,20 @@ pub struct DomainRaw {
     pub max_mem: u64,
     pub nets: Vec<NetRaw>,
     pub vbds: Vec<VbdRaw>,
+    /// Cumulative runnable time summed over all vCPUs, when only a
+    /// domain-wide figure is available (XCP-ng's whole-domain runstate
+    /// domctl). Per-vCPU figures in `vcpus` take precedence.
+    pub runnable_ns: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct VcpuRaw {
     pub online: bool,
+    /// Cumulative running time.
     pub ns: u64,
+    /// Cumulative time runnable but not running, i.e. waiting for a pCPU
+    /// (steal time). Needs a hypervisor with XEN_DOMCTL_get_vcpu_runstate.
+    pub runnable_ns: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -160,6 +168,10 @@ pub struct HostRates {
     /// Request-weighted mean service latency across all extended VBDs (µs).
     pub disk_rd_lat_us: Option<f64>,
     pub disk_wr_lat_us: Option<f64>,
+    /// Share of the CPU time vCPUs asked for that they spent waiting for a
+    /// pCPU: runnable / (running + runnable), in % over all domains that
+    /// report steal time. `None` when no domain does.
+    pub steal_pct: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -170,6 +182,12 @@ pub struct DomRates {
     /// 100.0 == one physical CPU fully used.
     pub cpu_pct: f64,
     pub vcpu_pct: Vec<f64>,
+    /// Steal time: share of the interval the domain's online vCPUs spent
+    /// runnable but not running (waiting for a pCPU), averaged over them,
+    /// like `st` in a Linux guest's top. 0..100.
+    pub steal_pct: Option<f64>,
+    /// Steal time per vCPU (0..100), when the hypervisor reports it per vCPU.
+    pub vcpu_steal_pct: Vec<Option<f64>>,
     pub vcpus_online: usize,
     pub mem: u64,
     pub max_mem: u64,
@@ -247,6 +265,25 @@ fn lat(usecs: u64, reqs: u64) -> Option<f64> {
     (reqs > 0).then(|| usecs as f64 / reqs as f64)
 }
 
+/// Runnable time each vCPU accumulated over the interval, or `None` for
+/// vCPUs without runstate data in either sample.
+fn vcpu_runnable(cur: &DomainRaw, prev: &DomainRaw) -> Vec<Option<u64>> {
+    cur.vcpus
+        .iter()
+        .enumerate()
+        .map(|(i, v)| Some(d(v.runnable_ns?, prev.vcpus.get(i)?.runnable_ns?)))
+        .collect()
+}
+
+/// Runnable time the whole domain accumulated over the interval: the sum of
+/// its vCPUs' when every vCPU has data, else the domain-wide counter.
+fn dom_runnable(cur: &DomainRaw, prev: &DomainRaw, per_vcpu: &[Option<u64>]) -> Option<u64> {
+    if !per_vcpu.is_empty() && per_vcpu.iter().all(Option::is_some) {
+        return Some(per_vcpu.iter().flatten().fold(0u64, |a, &b| a.saturating_add(b)));
+    }
+    Some(d(cur.runnable_ns?, prev.runnable_ns?))
+}
+
 /// Linux-style disk name for a Xen virtual block device number.
 pub fn vbd_name(dev: u32) -> String {
     let (major, minor) = (dev >> 8, dev & 0xff);
@@ -295,6 +332,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
 
     let (mut h_rd_us, mut h_wr_us, mut h_rd_done, mut h_wr_done) = (0u64, 0u64, 0u64, 0u64);
     let mut dom_cpu_total = 0f64;
+    // Steal over domains that report it: (runnable ns, running ns).
+    let mut h_steal: Option<(u64, u64)> = None;
 
     let mut domains = Vec::with_capacity(cur.domains.len());
     for dom in &cur.domains {
@@ -320,8 +359,17 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                     (d(v.ns, pv) as f64 / dt_ns * 100.0).min(100.0)
                 })
                 .collect();
+            let per_vcpu = vcpu_runnable(dom, p);
+            let pct = |ns: u64, n: usize| (ns as f64 / (dt_ns * n.max(1) as f64) * 100.0).min(100.0);
+            r.vcpu_steal_pct = per_vcpu.iter().map(|x| x.map(|ns| pct(ns, 1))).collect();
+            if let Some(ns) = dom_runnable(dom, p, &per_vcpu) {
+                r.steal_pct = Some(pct(ns, r.vcpus_online));
+                let (hr, hc) = h_steal.unwrap_or_default();
+                h_steal = Some((hr.saturating_add(ns), hc.saturating_add(d(dom.cpu_ns, p.cpu_ns))));
+            }
         } else {
             r.vcpu_pct = vec![0.0; dom.vcpus.len()];
+            r.vcpu_steal_pct = vec![None; dom.vcpus.len()];
         }
         dom_cpu_total += r.cpu_pct / 100.0;
 
@@ -407,6 +455,14 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
     }
     host.disk_rd_lat_us = lat(h_rd_us, h_rd_done);
     host.disk_wr_lat_us = lat(h_wr_us, h_wr_done);
+    host.steal_pct = h_steal.map(|(run, cpu)| {
+        let demand = run.saturating_add(cpu);
+        if demand == 0 {
+            0.0
+        } else {
+            run as f64 / demand as f64 * 100.0
+        }
+    });
 
     match (&prev.pcpu_idle_ns, &cur.pcpu_idle_ns) {
         (Some(pi), Some(ci)) if !ci.is_empty() => {
@@ -474,9 +530,11 @@ mod rate_tests {
             vcpus: vec![VcpuRaw {
                 online: true,
                 ns: cpu_ns,
+                runnable_ns: None,
             }],
             cur_mem: 0,
             max_mem: 0,
+            runnable_ns: None,
             nets: vec![],
             vbds: vec![VbdRaw {
                 dev: 51712,
@@ -516,6 +574,102 @@ mod rate_tests {
         );
         // No previous sample for "new": no bogus 400% spike.
         assert_eq!(r.domains[0].cpu_pct, 0.0);
+    }
+
+    /// A domain with `steal` ns of runnable time per vCPU (None: no data).
+    fn steal_dom(cpu_ns: u64, steal: &[Option<u64>]) -> DomainRaw {
+        DomainRaw {
+            vcpus: steal
+                .iter()
+                .map(|&s| VcpuRaw {
+                    online: true,
+                    ns: cpu_ns / steal.len() as u64,
+                    runnable_ns: s,
+                })
+                .collect(),
+            ..dom(7, "vm", cpu_ns, 0)
+        }
+    }
+
+    #[test]
+    fn steal_per_vcpu_and_domain() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        let r = compute(
+            &snap(t0, vec![steal_dom(0, &[Some(0), Some(1_000)])]),
+            // vCPU0 waited 100 ms, vCPU1 300 ms; both ran 500 ms.
+            &snap(
+                t1,
+                vec![steal_dom(1_000_000_000, &[Some(100_000_000), Some(300_001_000)])],
+            ),
+        );
+        let d = &r.domains[0];
+        let v: Vec<f64> = d.vcpu_steal_pct.iter().map(|x| x.unwrap()).collect();
+        assert!((v[0] - 10.0).abs() < 1e-9 && (v[1] - 30.0).abs() < 1e-9, "{v:?}");
+        // Mean over the two vCPUs.
+        assert!((d.steal_pct.unwrap() - 20.0).abs() < 1e-9);
+        // Host: 400 ms waited out of 1400 ms asked for.
+        assert!((r.host.steal_pct.unwrap() - 400.0 / 1400.0 * 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn steal_missing_is_none_not_zero() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        let r = compute(
+            &snap(t0, vec![steal_dom(0, &[None, None])]),
+            &snap(t1, vec![steal_dom(1_000, &[None, None])]),
+        );
+        assert_eq!(r.domains[0].steal_pct, None);
+        assert_eq!(r.domains[0].vcpu_steal_pct, vec![None, None]);
+        assert_eq!(r.host.steal_pct, None);
+
+        // Data appears only in the newer sample: nothing to diff yet.
+        let r = compute(
+            &snap(t0, vec![steal_dom(0, &[None])]),
+            &snap(t1, vec![steal_dom(1_000, &[Some(5)])]),
+        );
+        assert_eq!(r.domains[0].steal_pct, None);
+    }
+
+    #[test]
+    fn steal_domain_wide_fallback() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        let mk = |cpu, run| DomainRaw {
+            runnable_ns: Some(run),
+            ..steal_dom(cpu, &[None, None])
+        };
+        let r = compute(
+            &snap(t0, vec![mk(0, 0)]),
+            &snap(t1, vec![mk(600_000_000, 200_000_000)]),
+        );
+        let d = &r.domains[0];
+        // 200 ms over 2 vCPUs x 1 s.
+        assert!((d.steal_pct.unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(d.vcpu_steal_pct, vec![None, None]);
+        assert!((r.host.steal_pct.unwrap() - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn steal_counter_reset_and_clamp() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        // Counter went backwards (domain rebuilt under the same name and
+        // id): no negative or huge steal.
+        let r = compute(
+            &snap(t0, vec![steal_dom(0, &[Some(9_000_000_000)])]),
+            &snap(t1, vec![steal_dom(0, &[Some(5)])]),
+        );
+        assert_eq!(r.domains[0].steal_pct, Some(0.0));
+        assert_eq!(r.host.steal_pct, Some(0.0));
+        // More runnable time than wall time (clock skew): capped at 100%.
+        let r = compute(
+            &snap(t0, vec![steal_dom(0, &[Some(0)])]),
+            &snap(t1, vec![steal_dom(0, &[Some(3_000_000_000)])]),
+        );
+        assert_eq!(r.domains[0].vcpu_steal_pct, vec![Some(100.0)]);
+        assert_eq!(r.domains[0].steal_pct, Some(100.0));
     }
 
     #[test]
@@ -569,11 +723,19 @@ mod overflow_tests {
             name: "x".into(),
             state: DomState::Running,
             cpu_ns: u64::MAX,
-            vcpus: vec![],
+            vcpus: vec![
+                VcpuRaw {
+                    online: true,
+                    ns: u64::MAX,
+                    runnable_ns: Some(u64::MAX),
+                };
+                2
+            ],
             cur_mem: u64::MAX,
             max_mem: u64::MAX,
             nets: vec![net, net],
             vbds: vec![vbd, vbd],
+            runnable_ns: Some(u64::MAX),
         };
         let s = Snapshot {
             at: now,
@@ -596,5 +758,6 @@ mod overflow_tests {
         assert_eq!(r.domains[0].disk_errors, u64::MAX);
         assert_eq!(r.domains[0].net_errs, u64::MAX);
         assert!(r.host.cpu_busy.is_finite());
+        assert!(r.host.steal_pct.is_some_and(f64::is_finite));
     }
 }

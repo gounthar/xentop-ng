@@ -24,15 +24,25 @@ something expensive for a few seconds and shows it in place.
   time, so check for a running `xentrace`); overhead grows with the event
   mask, so keep windows short and masks narrow. Worth measuring the cost.
 
-### Scheduler latency and steal time
+### Scheduler latency
 
-- Time runnable-but-not-running per vCPU is the virtualisation-specific
-  number xentop never showed. It's the Xen equivalent of steal time.
-- **Cheap version:** a new libxenstat/domctl path that exposes runstate
-  times for other domains. Today only a domain's own runstate area has
-  them.
-- **Detailed version:** xentrace `TRC_SCHED_*` over a window, giving a
-  latency histogram per vCPU, which pCPUs it ran on, and migrations.
+- **Done: steal time** (runnable-but-not-running per vCPU), the number
+  xentop never showed. Patches 0003 (new `XEN_DOMCTL_get_vcpu_runstate`,
+  hypervisor) and 0004 (libxenstat) give it per vCPU; on XCP-ng/XenServer
+  hypervisors without 0003, xentop-ng falls back to their whole-domain
+  runstate domctl for a per-domain figure. Still to do: test 0003 on a
+  host booted on a rebuilt Xen, and upstream it.
+- **Stock hypervisors (upstream Xen, no 0003):** steal could come from
+  xentrace instead. `TRC_SCHED_RUNSTATE_CHANGE` records every vCPU
+  runstate transition with a TSC timestamp, so summing the runnable
+  intervals over a window gives the same number. Viable on demand (a few
+  seconds when the details panel opens), not always-on: trace buffers are
+  one global resource, need `CONFIG_TRACEBUFFER`, and on a busy host
+  runstate changes run into the 100k/s, which costs CPU to record and to
+  decode.
+- **Detailed version:** the same trace window also gives a wait-latency
+  histogram per vCPU (not just the total), which pCPUs it ran on, and
+  migrations.
 
 ### Latency flamegraphs
 

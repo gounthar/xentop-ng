@@ -24,6 +24,10 @@ pub struct DataStatus {
     pub pcpu: Avail,
     pub vbd_latency: Avail,
     pub vifs: Avail,
+    /// Steal time (vCPUs runnable but not running). Needs a hypervisor
+    /// patch, not just libxenstat, so it is left out of the header's
+    /// partial/fallback marker; the `i` popup still shows it.
+    pub steal: Avail,
 }
 
 impl DataStatus {
