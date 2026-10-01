@@ -1,6 +1,7 @@
+pub mod columns;
 mod widgets;
 
-use crate::app::{App, SortKey};
+use crate::app::App;
 use crate::fmt;
 use crate::model::{DomRates, DomState, Rates};
 use crate::theme::{Gradient, Theme};
@@ -34,6 +35,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let w = msg.chars().count() as u16;
         let x = body.x + body.width.saturating_sub(w) / 2;
         buf.set_string(x, body.y + body.height / 2, msg, Style::new().fg(th.dim));
+        if th.mono {
+            monochrome(buf, th, area);
+        }
         return;
     };
 
@@ -131,18 +135,47 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     if app.help {
-        help_popup(buf, th, area);
+        help_popup(buf, app, area);
     }
     if app.info {
         info_popup(buf, app, area);
     }
-    if app.ansi256 {
+    if app.chooser.is_some() {
+        chooser_popup(buf, app, area);
+    }
+    if th.mono {
+        monochrome(buf, th, area);
+    } else if app.ansi256 {
         for pos in area.positions() {
             if let Some(c) = buf.cell_mut(pos) {
                 c.fg = to_256(c.fg);
                 c.bg = to_256(c.bg);
             }
         }
+    }
+}
+
+/// NO_COLOR: turn the mono theme's role colours into attributes and drop
+/// every colour. Highlighted backgrounds (selection, badges) become reverse
+/// video, dim text stays dim, keys and warnings bold; empty meter cells get
+/// a different glyph so meters still read without colour.
+fn monochrome(buf: &mut Buffer, th: &Theme, area: Rect) {
+    for pos in area.positions() {
+        let Some(c) = buf.cell_mut(pos) else { continue };
+        let mut m = c.modifier;
+        if c.bg != th.bg && c.bg != Color::Reset {
+            m |= Modifier::REVERSED;
+        }
+        if c.fg == th.meter_empty && c.symbol() == "■" {
+            c.set_symbol("·");
+        } else if c.fg == th.dim {
+            m |= Modifier::DIM;
+        } else if c.fg == th.key || c.fg == th.warn {
+            m |= Modifier::BOLD;
+        }
+        c.modifier = m;
+        c.fg = Color::Reset;
+        c.bg = Color::Reset;
     }
 }
 
@@ -239,6 +272,16 @@ fn header(buf: &mut Buffer, app: &App, area: Rect) {
     buf.set_line(area.x, area.y, &left, area.width);
 
     let mut right = Vec::new();
+    if let Some(t) = app.current_toast() {
+        let max = (area.width as usize / 2).max(10);
+        let st = if t.warn {
+            Style::new().fg(th.warn).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(th.ok)
+        };
+        right.push(Span::styled(format!(" {} ", fmt::trunc(&t.msg, max)), st));
+        right.push(Span::raw(" "));
+    }
     if let Some(e) = &app.error {
         right.push(Span::styled(
             format!(" {} ", fmt::trunc(e, 50)),
@@ -489,6 +532,11 @@ fn pcpu_heatmap(
     half: bool,
     label_w: Option<usize>,
 ) {
+    if th.mono {
+        // No colour: shade glyphs carry the load instead, one per cell.
+        pcpu_shades(buf, th, h, area, cols, cw, half, label_w);
+        return;
+    }
     let color = |i: usize| -> Option<Color> {
         let v = *h.pcpu_busy.get(i)?;
         // Idle cores stay dim so the busy ones stand out.
@@ -533,6 +581,68 @@ fn pcpu_heatmap(
             for k in 0..fill {
                 if let Some(cell) = buf.cell_mut((x + k as u16, y)) {
                     cell.set_symbol(sym).set_fg(fg).set_bg(bg);
+                }
+            }
+        }
+    }
+}
+
+/// Monochrome heatmap: ` ░▒▓█` by load. In half-height mode a cell covers
+/// two pCPUs and shows the busier one.
+#[allow(clippy::too_many_arguments)]
+fn pcpu_shades(
+    buf: &mut Buffer,
+    th: &Theme,
+    h: &crate::model::HostRates,
+    area: Rect,
+    cols: usize,
+    cw: usize,
+    half: bool,
+    label_w: Option<usize>,
+) {
+    const SHADE: [&str; 5] = ["·", "░", "▒", "▓", "█"];
+    let per_row = if half { 2 } else { 1 };
+    let n = h.pcpu_busy.len();
+    let x0 = area.x + label_w.map(|w| w as u16 + 1).unwrap_or(0);
+    let fill = if cw > 1 { cw - 1 } else { 1 };
+    for ty in 0..area.height as usize {
+        let first = ty * per_row * cols;
+        if first >= n {
+            break;
+        }
+        let y = area.y + ty as u16;
+        if let Some(w) = label_w {
+            let id = h.pcpu_ids.get(first).copied().unwrap_or(first as u32);
+            buf.set_stringn(
+                area.x,
+                y,
+                format!("{:<w$}", format!("C{id}")),
+                w,
+                Style::new().fg(th.dim),
+            );
+        }
+        for c in 0..cols {
+            let x = x0 + (c * cw) as u16;
+            if x + fill as u16 > area.x + area.width {
+                break;
+            }
+            let top = h.pcpu_busy.get(first + c).copied();
+            let bot = if half {
+                h.pcpu_busy.get(first + cols + c).copied()
+            } else {
+                None
+            };
+            let Some(v) = top.map(|t| bot.map_or(t, |b| t.max(b))) else {
+                continue;
+            };
+            let lvl = if v < 0.02 {
+                0
+            } else {
+                (1.0 + v * 3.99).min(4.0) as usize
+            };
+            for k in 0..fill {
+                if let Some(cell) = buf.cell_mut((x + k as u16, y)) {
+                    cell.set_symbol(SHADE[lvl]).set_fg(th.fg);
                 }
             }
         }
@@ -817,113 +927,57 @@ fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
 // ---------------------------------------------------------------------------
 // Domain list
 
-#[derive(Clone, Copy, PartialEq)]
-enum Col {
-    Id,
-    Name,
-    State,
-    Vcpu,
-    Cpu,
-    CpuHist,
-    Mem,
-    NetRx,
-    NetTx,
-    DiskRd,
-    DiskWr,
-    Iops,
-    Lat,
-}
-
-impl Col {
-    fn title(self) -> &'static str {
-        match self {
-            Col::Id => "ID",
-            Col::Name => "NAME",
-            Col::State => "STATE",
-            Col::Vcpu => "VCPU",
-            Col::Cpu => "CPU",
-            Col::CpuHist => "CPU HISTORY",
-            Col::Mem => "MEM",
-            Col::NetRx => "NET ▼",
-            Col::NetTx => "NET ▲",
-            Col::DiskRd => "READ",
-            Col::DiskWr => "WRITE",
-            Col::Iops => "IOPS",
-            Col::Lat => "LAT",
-        }
-    }
-    fn sort(self) -> Option<SortKey> {
-        Some(match self {
-            Col::Id => SortKey::Id,
-            Col::Name => SortKey::Name,
-            Col::Cpu | Col::CpuHist => SortKey::Cpu,
-            Col::Mem => SortKey::Mem,
-            Col::NetRx => SortKey::Net,
-            Col::DiskRd => SortKey::Disk,
-            Col::Lat => SortKey::Lat,
-            _ => return None,
-        })
-    }
-    fn right(self) -> bool {
-        !matches!(self, Col::Name | Col::State | Col::Cpu | Col::CpuHist)
-    }
-}
-
-/// Choose columns and widths for the available width.
-fn layout_cols(width: u16) -> Vec<(Col, usize)> {
-    let width = width as usize;
-    // (column, width, priority: lower = kept longer)
-    let all = [
-        (Col::Id, 4, 0),
-        (Col::Name, 14, 0),
-        (Col::State, 6, 6),
-        (Col::Vcpu, 5, 7),
-        (Col::Cpu, 16, 0),
-        (Col::CpuHist, 12, 5),
-        (Col::Mem, 7, 0),
-        (Col::NetRx, 8, 1),
-        (Col::NetTx, 8, 1),
-        (Col::DiskRd, 8, 2),
-        (Col::DiskWr, 8, 2),
-        (Col::Iops, 7, 4),
-        (Col::Lat, 8, 3),
-    ];
-    let mut max_prio = 8;
-    loop {
-        let cols: Vec<(Col, usize)> = all
-            .iter()
-            .filter(|c| c.2 <= max_prio)
-            .map(|c| (c.0, c.1))
-            .collect();
-        let used: usize = cols.iter().map(|c| c.1 + 1).sum();
-        if used <= width || max_prio == 0 {
-            let mut cols = cols;
-            let mut extra = width.saturating_sub(used);
-            // Grow the name a bit, then give everything else to the history.
-            if let Some(c) = cols.iter_mut().find(|c| c.0 == Col::Name) {
-                let g = extra.min(12);
-                c.1 += g;
-                extra -= g;
-            }
-            if let Some(c) = cols.iter_mut().find(|c| c.0 == Col::CpuHist) {
-                c.1 += extra;
-            } else if let Some(c) = cols.iter_mut().find(|c| c.0 == Col::Name) {
-                c.1 += extra;
-            }
-            return cols;
-        }
-        max_prio -= 1;
-    }
-}
-
 fn pad(s: String, w: usize, right: bool) -> String {
     fmt::pad(&s, w, right)
+}
+
+/// Footer hints, most important first; as many as fit are shown, in this
+/// order, followed by "? help".
+const HINTS: &[(&str, &str)] = &[
+    ("⏎", "details"),
+    ("s", "sort"),
+    ("/", "filter"),
+    ("o", "columns"),
+    ("↑↓", "select"),
+    ("1-5", "boxes"),
+    ("t", "theme"),
+    ("r", "reverse"),
+    ("+-", "speed"),
+    ("p", "pause"),
+    ("q", "quit"),
+];
+
+/// The footer hint line for `width` cells: the most important hints that
+/// fit, always ending with "? help".
+fn footer_hints(th: &Theme, width: usize) -> Line<'static> {
+    let item_w = |k: &str, w: &str| fmt::width(k) + 1 + fmt::width(w) + 2;
+    let mut budget = width.saturating_sub(4 + item_w("?", "help"));
+    let mut keep = [false; HINTS.len()];
+    for (i, (k, w)) in HINTS.iter().enumerate() {
+        let need = item_w(k, w);
+        if need <= budget {
+            keep[i] = true;
+            budget -= need;
+        }
+    }
+    let mut v = vec![Span::raw(" ")];
+    for (i, (k, w)) in HINTS.iter().enumerate() {
+        if keep[i] {
+            v.push(Span::styled(*k, Style::new().fg(th.key)));
+            v.push(dim(th, format!(" {w}  ")));
+        }
+    }
+    v.push(Span::styled("?", Style::new().fg(th.key)));
+    v.push(dim(th, " help "));
+    Line::from(v)
 }
 
 fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
     let th = app.theme();
     let vis_ids: Vec<u32> = app.visible().iter().map(|d| d.id).collect();
     let arrow = if app.reverse { "▲" } else { "▼" };
+    let inner_w = area.width.saturating_sub(2);
+    let (cols, dropped) = columns::layout(&app.enabled_columns(), inner_w);
     let mut right = vec![
         Span::styled(format!("{}", vis_ids.len()), Style::new().fg(th.fg)),
         dim(
@@ -935,8 +989,19 @@ fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
             },
         ),
         dim(th, "  sort "),
-        Span::styled(format!("{} {arrow}", app.sort.label()), Style::new().fg(th.key)),
+        Span::styled(
+            format!("{} {arrow}", columns::sort_label(app.sort)),
+            Style::new().fg(th.key),
+        ),
     ];
+    if !dropped.is_empty() {
+        right.push(dim(th, "  "));
+        right.push(Span::styled(
+            format!("+{} hidden", dropped.len()),
+            Style::new().fg(th.warn),
+        ));
+        right.push(dim(th, " (o)"));
+    }
     if !app.filter.is_empty() && !app.filter_edit {
         right.push(dim(th, "  filter "));
         right.push(Span::styled(
@@ -945,59 +1010,48 @@ fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
         ));
     }
     let mut block = boxed(th, "⁵", "domains", right);
-    let hints: Vec<Span> = if app.filter_edit {
-        vec![
+    let hints = if app.filter_edit {
+        Line::from(vec![
             Span::styled(" filter: ", Style::new().fg(th.key)),
             Span::styled(format!("{}█ ", app.filter), Style::new().fg(th.fg)),
             dim(th, "⏎ apply  esc clear "),
-        ]
+        ])
     } else {
-        let k = |key: &'static str, what: &'static str| {
-            [Span::styled(key, Style::new().fg(th.key)), dim(th, what)]
-        };
-        let mut v = vec![Span::raw(" ")];
-        for (key, what) in [
-            ("↑↓", " select  "),
-            ("⏎", " details  "),
-            ("s", " sort  "),
-            ("r", " reverse  "),
-            ("/", " filter  "),
-            ("1-5", " boxes  "),
-            ("t", " theme  "),
-            ("+-", " speed  "),
-            ("p", " pause  "),
-            ("?", " help  "),
-            ("q", " quit "),
-        ] {
-            v.extend(k(key, what));
-        }
-        v
+        footer_hints(th, area.width as usize)
     };
-    block = block.title_bottom(Line::from(hints));
+    block = block.title_bottom(hints);
     let inner = block.inner(area);
     block.render(area, buf);
+    app.cols_dropped = dropped;
+    app.head_cells.clear();
+    app.table_head = Rect::default();
     if inner.height < 2 {
+        app.table_rows = Rect::default();
         return;
     }
 
-    let cols = layout_cols(inner.width);
-    // Header
+    // Header: click a title to sort by it.
     let mut x = inner.x;
     for (c, w) in &cols {
-        let active = c.sort() == Some(app.sort) && *c != Col::CpuHist;
+        let active = columns::shows_sort(c, app.sort);
         let t = if active {
-            format!("{}{arrow}", c.title())
+            format!("{}{arrow}", c.title)
         } else {
-            c.title().to_string()
+            c.title.to_string()
         };
         let style = if active {
-            Style::new().fg(th.key).add_modifier(Modifier::BOLD)
+            Style::new()
+                .fg(th.key)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::new().fg(th.dim).add_modifier(Modifier::BOLD)
         };
-        buf.set_stringn(x, inner.y, pad(t, *w, c.right()), *w, style);
-        x += *w as u16 + 1;
+        let shown = (*w as u16).min((inner.x + inner.width).saturating_sub(x));
+        buf.set_stringn(x, inner.y, pad(t, *w, c.right), shown as usize, style);
+        app.head_cells.push((x, shown, c.id));
+        x = x.saturating_add(*w as u16 + 1);
     }
+    app.table_head = Rect::new(inner.x, inner.y, inner.width, 1);
 
     let rows = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
     let n_rows = rows.height as usize;
@@ -1017,8 +1071,16 @@ fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
     for (i, id) in vis_ids.iter().skip(off).take(n_rows).enumerate() {
         let Some(d) = by_id.get(id) else { continue };
         let y = rows.y + i as u16;
-        let line = dom_row(app, th, d, &cols);
-        put(buf, rows.x, y, rows.width, &line);
+        let cx = columns::RowCtx {
+            th,
+            hist: app.hist.doms.get(&d.id),
+        };
+        let mut sp: Vec<Span<'static>> = Vec::new();
+        for (c, w) in &cols {
+            sp.extend((c.render)(&cx, d, *w));
+            sp.push(Span::raw(" "));
+        }
+        put(buf, rows.x, y, rows.width, &Line::from(sp));
         if Some(off + i) == sel_idx {
             buf.set_style(Rect::new(rows.x, y, rows.width, 1), Style::new().bg(th.sel_bg));
         }
@@ -1038,108 +1100,6 @@ fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
         }
     }
 }
-
-fn dom_row(app: &App, th: &Theme, d: &DomRates, cols: &[(Col, usize)]) -> Line<'static> {
-    let hist = app.hist.doms.get(&d.id);
-    let mut sp: Vec<Span<'static>> = Vec::new();
-    let num = |v: String, zero: bool, w: usize, c: Color| {
-        Span::styled(pad(v, w, true), Style::new().fg(if zero { th.dim } else { c }))
-    };
-    for (c, w) in cols {
-        let w = *w;
-        match c {
-            Col::Id => sp.push(Span::styled(
-                pad(d.id.to_string(), w, true),
-                Style::new().fg(th.dim),
-            )),
-            Col::Name => {
-                let st = match d.state {
-                    _ if d.id == 0 => Style::new().fg(th.title).add_modifier(Modifier::BOLD),
-                    Some(DomState::Crashed) => Style::new().fg(th.bad).add_modifier(Modifier::BOLD),
-                    Some(DomState::Paused) | Some(DomState::Shutdown) | Some(DomState::Dying) => {
-                        Style::new().fg(th.dim).add_modifier(Modifier::ITALIC)
-                    }
-                    _ => Style::new().fg(th.fg),
-                };
-                sp.push(Span::styled(pad(d.name.clone(), w, false), st));
-            }
-            Col::State => {
-                // Xen's running/blocked flags are an instantaneous snapshot
-                // (a busy VM is usually "blocked" at any given moment), so
-                // judge activity by CPU use over the interval instead.
-                let active = d.cpu_pct >= 5.0;
-                let (t, c) = match d.state {
-                    Some(DomState::Running) | Some(DomState::Blocked) if active => ("● run", th.ok),
-                    Some(DomState::Running) | Some(DomState::Blocked) => ("○ idle", th.dim),
-                    Some(DomState::Paused) => ("‖ paus", th.warn),
-                    Some(DomState::Crashed) => ("✖ CRSH", th.bad),
-                    Some(DomState::Shutdown) => ("◌ shut", th.dim),
-                    Some(DomState::Dying) => ("◌ dyin", th.dim),
-                    None => ("?", th.dim),
-                };
-                sp.push(Span::styled(pad(t.into(), w, false), Style::new().fg(c)));
-            }
-            Col::Vcpu => {
-                // xenstat reports max vCPUs; show online/max when they differ.
-                let max = d.vcpu_pct.len();
-                let t = if d.vcpus_online == max {
-                    max.to_string()
-                } else {
-                    format!("{}/{max}", d.vcpus_online)
-                };
-                sp.push(num(t, false, w, th.fg))
-            }
-            Col::Cpu => {
-                let cap = (d.vcpus_online.max(1) * 100) as f64;
-                let f = d.cpu_pct / cap;
-                let mw = w.saturating_sub(7);
-                sp.extend(meter(f, mw, &th.cpu, th.meter_empty));
-                sp.push(Span::styled(
-                    format!("{:>7}", fmt::pct(d.cpu_pct)),
-                    Style::new().fg(if d.cpu_pct < 0.5 {
-                        th.dim
-                    } else {
-                        th.cpu.at(f.max(0.15))
-                    }),
-                ));
-            }
-            Col::CpuHist => {
-                let data = hist.map(|h| h.cpu.tail(w)).unwrap_or_default();
-                let cap = (d.vcpus_online.max(1) * 100) as f64;
-                sp.extend(sparkline(&data, cap, w, &th.cpu, th.meter_empty));
-            }
-            Col::Mem => sp.push(num(fmt::bytes(d.mem as f64), false, w, th.mem.at(0.6))),
-            Col::NetRx => sp.push(num(fmt::rate(d.net_rx_bps), d.net_rx_bps < 0.5, w, th.rx.at(1.0))),
-            Col::NetTx => sp.push(num(fmt::rate(d.net_tx_bps), d.net_tx_bps < 0.5, w, th.tx.at(1.0))),
-            Col::DiskRd => sp.push(num(
-                fmt::rate(d.disk_rd_bps),
-                d.disk_rd_bps < 0.5,
-                w,
-                th.rd.at(1.0),
-            )),
-            Col::DiskWr => sp.push(num(
-                fmt::rate(d.disk_wr_bps),
-                d.disk_wr_bps < 0.5,
-                w,
-                th.wr.at(1.0),
-            )),
-            Col::Iops => {
-                let v = d.disk_rd_iops + d.disk_wr_iops;
-                sp.push(num(fmt::count(v), v < 0.5, w, th.fg))
-            }
-            Col::Lat => {
-                let l = d.lat_us();
-                sp.push(Span::styled(
-                    pad(fmt::lat(l), w, true),
-                    Style::new().fg(lat_color(th, l)),
-                ));
-            }
-        }
-        sp.push(Span::raw(" "));
-    }
-    Line::from(sp)
-}
-
 // ---------------------------------------------------------------------------
 // Domain detail
 
@@ -1147,7 +1107,8 @@ fn dom_row(app: &App, th: &Theme, d: &DomRates, cols: &[(Col, usize)]) -> Line<'
 fn detail_height(d: &DomRates, width: u16) -> u16 {
     let per_row = ((width as usize).saturating_sub(2) / 23).max(1);
     let section = |n: usize| if n > 0 { 2 + n } else { 0 };
-    (2 + 1 + 3 + d.vcpu_pct.len().div_ceil(per_row) + section(d.vbds.len()) + section(d.nets.len())) as u16
+    (2 + 1 + 1 + 3 + d.vcpu_pct.len().div_ceil(per_row) + section(d.vbds.len()) + section(d.nets.len()))
+        as u16
 }
 
 fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
@@ -1203,6 +1164,32 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
         bold(fmt::bytes(d.mem as f64), th.mem.at(0.7)),
         dim(th, format!(" / {}", fmt::bytes(d.max_mem as f64))),
     ]));
+
+    // Memory over time, one compact line: a sparkline against the
+    // domain's maximum and the range seen, so ballooning shows. Most
+    // domains never change; say so instead of drawing a solid bar.
+    if let Some(h) = hist {
+        let lw = w.saturating_sub(4 + 26);
+        if y < bottom {
+            let data = h.mem.tail(lw.max(1));
+            let (lo, hi) = data
+                .iter()
+                .fold((f64::MAX, 0.0f64), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            let secs = (data.len() as f64 * app.interval.as_secs_f64()).round();
+            let mut sp = vec![dim(th, "mem ")];
+            if hi - lo < 1024.0 * 1024.0 || lw < 8 {
+                sp.push(dim(th, format!("steady at {} for {secs:.0}s", fmt::bytes(hi))));
+            } else {
+                let cap = (d.max_mem as f64).max(hi);
+                sp.extend(sparkline(&data, cap, lw, &th.mem, th.meter_empty));
+                sp.push(dim(
+                    th,
+                    format!("  {} – {} in {secs:.0}s", fmt::bytes(lo), fmt::bytes(hi)),
+                ));
+            }
+            line!(Line::from(sp));
+        }
+    }
 
     // CPU history graph.
     let gh = if inner.height >= 30 { 6 } else { 3 };
@@ -1268,11 +1255,11 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
                     Style::new().fg(th.wr.at(1.0))
                 ),
                 Span::styled(
-                    format!("{:>8}", fmt::lat(v.rd_lat_us)),
+                    format!("{:>8}", columns::lat_text(v.rd_lat_us)),
                     Style::new().fg(lat_color(th, v.rd_lat_us))
                 ),
                 Span::styled(
-                    format!("{:>8}", fmt::lat(v.wr_lat_us)),
+                    format!("{:>8}", columns::lat_text(v.wr_lat_us)),
                     Style::new().fg(lat_color(th, v.wr_lat_us))
                 ),
                 Span::styled(
@@ -1321,41 +1308,139 @@ fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) {
 // ---------------------------------------------------------------------------
 // Help
 
-fn help_popup(buf: &mut Buffer, th: &Theme, area: Rect) {
-    let keys: &[(&str, &str)] = &[
-        ("↑ ↓  j k", "select domain"),
-        ("PgUp PgDn  g G", "page / first / last"),
-        ("⏎  space  dbl-click", "toggle domain details"),
-        ("s  S  ← →", "next / previous sort column"),
-        ("c m n d l", "sort by cpu, mem, net, disk, latency"),
-        ("r", "reverse sort order"),
-        ("0", "pin Domain-0 on top"),
-        ("/  f", "filter by name or id"),
-        ("1 2 3 4", "toggle cpu / mem / net / disk boxes"),
-        ("5", "domains only (again: restore boxes)"),
-        ("+  -", "slower / faster refresh"),
-        ("p", "pause sampling"),
-        ("t  T", "cycle colour theme"),
-        ("i", "data sources (what libxenstat provides)"),
-        ("esc", "close details / clear filter"),
-        ("q  ctrl-c", "quit"),
-    ];
-    let lines = keys
-        .iter()
-        .map(|(k, what)| {
-            Line::from(vec![
-                Span::styled(format!("{k:<22}"), Style::new().fg(th.key)),
-                Span::styled(*what, Style::new().fg(th.fg)),
-            ])
-        })
-        .collect();
-    popup(buf, th, area, " help ", 62, lines);
+/// Every key, by topic, for `?`. Keep README's key table in step.
+pub const HELP: &[(&str, &[(&str, &str)])] = &[
+    (
+        "navigate",
+        &[
+            ("↑ ↓  j k  wheel", "select domain"),
+            ("PgUp PgDn  g G", "page / first / last"),
+            ("⏎  space  dbl-click", "toggle domain details"),
+            ("esc", "close details / clear filter"),
+        ],
+    ),
+    (
+        "sort & filter",
+        &[
+            ("s S  ← →", "next / previous sort column"),
+            ("click a title", "sort by it; again: reverse"),
+            ("c m n d l", "sort by cpu, mem, net, disk, latency"),
+            ("r", "reverse sort order"),
+            ("0", "pin Domain-0 on top"),
+            ("/  f", "filter by name or id"),
+        ],
+    ),
+    (
+        "view",
+        &[
+            ("1 2 3 4", "toggle cpu / mem / net / disk boxes"),
+            ("5", "domains only (again: restore boxes)"),
+            ("o", "choose and reorder columns"),
+            ("t  T", "next / previous colour theme"),
+            ("i", "data sources (what libxenstat provides)"),
+        ],
+    ),
+    (
+        "sampling & settings",
+        &[
+            ("+  -", "slower / faster refresh"),
+            ("p", "pause sampling"),
+            ("W", "save settings now (also saved on quit)"),
+            ("?  h  F1", "this help"),
+            ("q  ctrl-c", "quit"),
+        ],
+    ),
+];
+
+const HELP_KEY_W: usize = 23;
+
+fn help_group(th: &Theme, title: &str, keys: &[(&str, &str)]) -> Vec<Line<'static>> {
+    let mut v = vec![Line::from(Span::styled(
+        title.to_string(),
+        Style::new().fg(th.title).add_modifier(Modifier::BOLD),
+    ))];
+    for (k, what) in keys {
+        v.push(Line::from(vec![
+            Span::styled(format!("  {k:<w$}", w = HELP_KEY_W - 2), Style::new().fg(th.key)),
+            Span::styled(what.to_string(), Style::new().fg(th.fg)),
+        ]));
+    }
+    v.push(Line::from(""));
+    v
 }
 
-/// Centered, bordered popup listing `lines`.
-fn popup(buf: &mut Buffer, th: &Theme, area: Rect, title: &'static str, width: u16, lines: Vec<Line>) {
+/// Help: grouped by topic, in two columns when the screen is wide enough,
+/// scrollable (↑↓) when it still doesn't fit.
+fn help_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
+    let th = app.theme();
+    let groups: Vec<Vec<Line>> = HELP.iter().map(|(t, k)| help_group(th, t, k)).collect();
+    let desc_w = HELP
+        .iter()
+        .flat_map(|g| g.1.iter())
+        .map(|(_, w)| fmt::width(w))
+        .max()
+        .unwrap_or(0);
+    let col_w = HELP_KEY_W + desc_w;
+    let total: usize = groups.iter().map(|g| g.len()).sum();
+    // Two columns: split the groups where the taller side is shortest.
+    let split = (1..groups.len())
+        .min_by_key(|&i| {
+            let left: usize = groups[..i].iter().map(|g| g.len()).sum();
+            left.max(total - left)
+        })
+        .unwrap_or(groups.len());
+    let two = area.width as usize >= 2 * col_w + 8 && groups.len() > 1;
+    let (left, right): (Vec<Line>, Vec<Line>) = if two {
+        (groups[..split].concat(), groups[split..].concat())
+    } else {
+        (groups.concat(), Vec::new())
+    };
+    let mut rows = left.len().max(right.len());
+    // The last group's trailing blank line isn't needed.
+    rows = rows.saturating_sub(1);
+    let width = if two { 2 * col_w + 7 } else { col_w + 4 };
+    let avail = area.height.saturating_sub(4) as usize;
+    let max_scroll = rows.saturating_sub(avail);
+    app.help_scroll = app.help_scroll.min(max_scroll);
+    let scroll = app.help_scroll;
+    let footer = match max_scroll {
+        0 => " any key to close ",
+        m if scroll < m => " ▼ more · ↑↓ scroll · other keys close ",
+        _ => " ▲ more · ↑↓ scroll · other keys close ",
+    };
+    let (outer, inner) = popup_frame(buf, th, area, " help ", width as u16, rows as u16 + 4, footer);
+    app.popup_area = outer;
+    let body = Rect::new(
+        inner.x + 1,
+        inner.y + 1,
+        inner.width.saturating_sub(2),
+        inner.height.saturating_sub(2),
+    );
+    for (ci, col) in [left, right].iter().enumerate() {
+        let x = body.x + (ci * (col_w + 3)) as u16;
+        if x >= body.x + body.width {
+            break;
+        }
+        let w = (body.x + body.width - x).min(col_w as u16);
+        for (i, l) in col.iter().skip(scroll).take(body.height as usize).enumerate() {
+            put(buf, x, body.y + i as u16, w, l);
+        }
+    }
+}
+
+/// Clear a centered `width` x `height` box (clipped to `area`) and draw a
+/// popup frame. Returns the outer and inner rectangles.
+fn popup_frame(
+    buf: &mut Buffer,
+    th: &Theme,
+    area: Rect,
+    title: &'static str,
+    width: u16,
+    height: u16,
+    footer: &'static str,
+) -> (Rect, Rect) {
     let w = width.min(area.width);
-    let h = (lines.len() as u16 + 4).min(area.height);
+    let h = height.min(area.height);
     let r = Rect::new(
         area.x + (area.width - w) / 2,
         area.y + (area.height - h) / 2,
@@ -1368,9 +1453,30 @@ fn popup(buf: &mut Buffer, th: &Theme, area: Rect, title: &'static str, width: u
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(th.key))
         .title_top(Line::from(vec![bold(title, th.title)]))
-        .title_bottom(Line::from(dim(th, " any key to close ")).right_aligned());
+        .title_bottom(Line::from(dim(th, footer)).right_aligned());
     let inner = block.inner(r);
     block.render(r, buf);
+    (r, inner)
+}
+
+/// Centered, bordered popup listing `lines`. Returns its area.
+fn popup(
+    buf: &mut Buffer,
+    th: &Theme,
+    area: Rect,
+    title: &'static str,
+    width: u16,
+    lines: Vec<Line>,
+) -> Rect {
+    let (r, inner) = popup_frame(
+        buf,
+        th,
+        area,
+        title,
+        width,
+        lines.len() as u16 + 4,
+        " any key to close ",
+    );
     for (i, l) in lines.iter().enumerate() {
         let y = inner.y + 1 + i as u16;
         if y >= inner.y + inner.height {
@@ -1378,9 +1484,95 @@ fn popup(buf: &mut Buffer, th: &Theme, area: Rect, title: &'static str, width: u
         }
         put(buf, inner.x + 1, y, inner.width.saturating_sub(2), l);
     }
+    r
 }
 
-fn info_popup(buf: &mut Buffer, app: &App, area: Rect) {
+/// Column chooser (`o`): every column with a checkbox, in display order.
+fn chooser_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
+    let th = app.theme();
+    let n = app.columns.len();
+    let cursor = app.chooser.unwrap_or(0).min(n.saturating_sub(1));
+    let (outer, inner) = popup_frame(buf, th, area, " columns ", 76, n as u16 + 4, " esc close ");
+    app.popup_area = outer;
+    if inner.width < 10 || inner.height < 2 {
+        app.chooser_hits = Default::default();
+        return;
+    }
+    let x = inner.x + 1;
+    let w = inner.width.saturating_sub(2);
+    let k = |s: &'static str| Span::styled(s, Style::new().fg(th.key));
+    put(
+        buf,
+        x,
+        inner.y,
+        w,
+        &Line::from(vec![
+            k("space"),
+            dim(th, " show/hide  "),
+            k("J K"),
+            dim(th, " or "),
+            k("⇧↑↓"),
+            dim(th, " move  "),
+            k("d"),
+            dim(th, " defaults  "),
+            dim(th, "click: toggle, ▲▼ move"),
+        ]),
+    );
+    let rows = Rect::new(x, inner.y + 2, w, inner.height.saturating_sub(2));
+    let vis = rows.height as usize;
+    let scroll = if vis == 0 {
+        0
+    } else {
+        let s = app.chooser_hits.scroll.min(cursor);
+        if cursor >= s + vis {
+            cursor + 1 - vis
+        } else {
+            s
+        }
+    };
+    // "▸ [x] ▲▼ TITLE..."
+    let up_x = x + 6;
+    app.chooser_hits = crate::app::ChooserHits {
+        rows,
+        scroll,
+        up_x,
+        down_x: up_x + 1,
+    };
+    for (i, (id, on)) in app.columns.iter().enumerate().skip(scroll).take(vis) {
+        let Some(c) = columns::column(id) else { continue };
+        let y = rows.y + (i - scroll) as u16;
+        let check = match (c.locked, on) {
+            (true, _) => "[•]",
+            (false, true) => "[x]",
+            (false, false) => "[ ]",
+        };
+        let fg = if *on { th.fg } else { th.dim };
+        let mut sp = vec![
+            Span::styled(if i == cursor { "▸ " } else { "  " }, Style::new().fg(th.key)),
+            Span::styled(
+                format!("{check} "),
+                Style::new().fg(if *on { th.key } else { th.dim }),
+            ),
+            dim(th, "▲▼ "),
+            Span::styled(
+                format!("{:<12}", c.title),
+                Style::new().fg(fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(c.about, Style::new().fg(fg)),
+        ];
+        if c.locked {
+            sp.push(dim(th, "  (always)"));
+        } else if app.cols_dropped.contains(&c.id) {
+            sp.push(Span::styled("  (no room)", Style::new().fg(th.warn)));
+        }
+        put(buf, x, y, w, &Line::from(sp));
+        if i == cursor {
+            buf.set_style(Rect::new(x, y, w, 1), Style::new().bg(th.sel_bg));
+        }
+    }
+}
+
+fn info_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
     use crate::source::Avail;
     let th = app.theme();
     let st = &app.status;
@@ -1430,7 +1622,7 @@ fn info_popup(buf: &mut Buffer, app: &App, area: Rect) {
         Line::from(dim(th, "libxenstat patches in the xentop-ng repository")),
         Line::from(dim(th, "(libxenstat/) provide all of it natively.")),
     ];
-    popup(buf, th, area, " data sources ", 70, lines);
+    app.popup_area = popup(buf, th, area, " data sources ", 70, lines);
 }
 
 #[cfg(test)]
@@ -1455,7 +1647,9 @@ mod tests {
     }
 
     /// Every view, at every size from absurdly small to very large, on hosts
-    /// from 1 to 1024 pCPUs, must render without panicking.
+    /// from 1 to 1024 pCPUs, must render without panicking: in the default
+    /// theme at every size, and in the colorblind theme and monochrome
+    /// (NO_COLOR) at a spread of sizes.
     #[test]
     fn renders_everywhere() {
         let gib = 1u64 << 30;
@@ -1466,7 +1660,9 @@ mod tests {
             (128, 1024 * gib, false),
             (1024, 8192 * gib, false),
         ];
-        let sizes = [1u16, 5, 12, 20, 24, 31, 40, 57, 80, 119, 160, 200, 300];
+        let all = [1u16, 5, 12, 20, 24, 31, 40, 57, 80, 119, 160, 200, 300];
+        let some = [1u16, 12, 24, 40, 80, 160, 300];
+        let colorblind = crate::theme::by_name("colorblind").unwrap();
         for (pcpus, mem, stock) in hosts {
             let cfg = DemoConfig {
                 pcpus,
@@ -1475,25 +1671,100 @@ mod tests {
                 ..Default::default()
             };
             let mut a = app(&cfg);
-            for &w in &sizes {
-                for &h in sizes.iter().filter(|&&h| h <= 80) {
-                    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-                    for keys in [
-                        &[][..],
-                        &[KeyCode::Down, KeyCode::Enter],
-                        &[KeyCode::Char('?')],
-                        &[KeyCode::Char('i')],
-                    ] {
-                        for k in keys {
-                            a.on_key(KeyEvent::from(*k));
+            for (theme, mono, sizes) in [(0, false, &all[..]), (colorblind, false, &some), (0, true, &some)] {
+                a.theme = theme;
+                a.mono = mono;
+                for &w in sizes {
+                    for &h in sizes.iter().filter(|&&h| h <= 80) {
+                        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                        for keys in [
+                            &[][..],
+                            &[KeyCode::Down, KeyCode::Enter],
+                            &[KeyCode::Char('?')],
+                            &[KeyCode::Char('?'), KeyCode::Down, KeyCode::PageDown],
+                            &[KeyCode::Char('i')],
+                            &[KeyCode::Char('o')],
+                            &[
+                                KeyCode::Char('o'),
+                                KeyCode::End,
+                                KeyCode::Char('K'),
+                                KeyCode::Char(' '),
+                            ],
+                        ] {
+                            for k in keys {
+                                a.on_key(KeyEvent::from(*k));
+                            }
+                            term.draw(|f| super::draw(f, &mut a)).unwrap();
+                            a.help = false;
+                            a.info = false;
+                            a.chooser = None;
                         }
-                        term.draw(|f| super::draw(f, &mut a)).unwrap();
-                        a.help = false;
-                        a.info = false;
+                        a.detail = false;
                     }
-                    a.detail = false;
                 }
             }
+        }
+    }
+
+    /// NO_COLOR: not a single colour reaches the terminal, and the
+    /// selection is still visible (reverse video).
+    #[test]
+    fn monochrome_has_no_colour() {
+        use ratatui::style::{Color, Modifier};
+        let mut a = app(&DemoConfig::default());
+        a.mono = true;
+        a.on_key(KeyEvent::from(KeyCode::Down));
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        let mut term = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        term.draw(|f| super::draw(f, &mut a)).unwrap();
+        let buf = term.backend().buffer();
+        assert!(buf
+            .content
+            .iter()
+            .all(|c| c.fg == Color::Reset && c.bg == Color::Reset));
+        let y = a.table_rows.y;
+        let reversed = (0..200)
+            .filter(|&x| buf[(x, y)].modifier.contains(Modifier::REVERSED))
+            .count();
+        assert!(reversed > 100, "selected row in reverse video");
+    }
+
+    /// The footer shows what fits, and always ends with "? help".
+    #[test]
+    fn footer_adapts_to_width() {
+        let th = &crate::theme::THEMES[0];
+        let mut prev = 0;
+        for w in [10usize, 30, 60, 100, 200] {
+            let l = super::footer_hints(th, w);
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.trim_end().ends_with("? help"), "{w}: {text}");
+            assert!(w < 20 || l.width() <= w - 2, "{w}: {text}");
+            assert!(l.width() >= prev);
+            prev = l.width();
+        }
+        let wide: String = super::footer_hints(th, 200)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        for k in ["details", "sort", "filter", "columns", "quit"] {
+            assert!(wide.contains(k), "{k}");
+        }
+    }
+
+    /// Every key the app handles is in the help.
+    #[test]
+    fn help_lists_every_key() {
+        let keys: String = super::HELP
+            .iter()
+            .flat_map(|g| g.1.iter())
+            .map(|(k, _)| format!(" {k} "))
+            .collect();
+        for k in [
+            "j", "k", "g", "G", "s", "S", "r", "c", "0", "/", "f", "5", "o", "t", "T", "+", "-", "p", "W",
+            "?", "h", "F1", "q", "esc", "i",
+        ] {
+            assert!(keys.contains(&format!(" {k} ")), "{k} missing from help");
         }
     }
 }

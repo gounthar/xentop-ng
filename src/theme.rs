@@ -38,6 +38,10 @@ pub struct Theme {
     pub warn: Color,
     pub bad: Color,
     pub meter_empty: Color,
+    /// Monochrome (`NO_COLOR`, `--colors mono`): colours are stripped after
+    /// drawing, so anything that matters must also show through glyphs or
+    /// text attributes.
+    pub mono: bool,
 }
 
 const fn rgb(c: (u8, u8, u8)) -> Color {
@@ -65,6 +69,7 @@ pub const THEMES: &[Theme] = &[
         warn: rgb((0xf2, 0xe2, 0x66)),
         bad: rgb((0xfa, 0x3e, 0x3e)),
         meter_empty: rgb((0x2a, 0x2a, 0x30)),
+        mono: false,
     },
     Theme {
         name: "xcp-ng",
@@ -86,6 +91,7 @@ pub const THEMES: &[Theme] = &[
         warn: rgb((0xff, 0xc8, 0x3d)),
         bad: rgb((0xff, 0x4d, 0x4d)),
         meter_empty: rgb((0x16, 0x24, 0x3a)),
+        mono: false,
     },
     Theme {
         name: "dracula",
@@ -107,6 +113,7 @@ pub const THEMES: &[Theme] = &[
         warn: rgb((0xf1, 0xfa, 0x8c)),
         bad: rgb((0xff, 0x55, 0x55)),
         meter_empty: rgb((0x34, 0x37, 0x46)),
+        mono: false,
     },
     Theme {
         name: "gruvbox",
@@ -128,8 +135,59 @@ pub const THEMES: &[Theme] = &[
         warn: rgb((0xfa, 0xbd, 0x2f)),
         bad: rgb((0xfb, 0x49, 0x34)),
         meter_empty: rgb((0x32, 0x30, 0x2f)),
+        mono: false,
+    },
+    // Safe for red/green colour blindness: blue → yellow → orange ramps
+    // (Okabe-Ito hues), and nothing that only differs by red vs green.
+    Theme {
+        name: "colorblind",
+        bg: rgb((0x12, 0x14, 0x1a)),
+        fg: rgb((0xd8, 0xdc, 0xe4)),
+        dim: rgb((0x6a, 0x70, 0x7c)),
+        border: rgb((0x3a, 0x40, 0x4c)),
+        title: rgb((0x56, 0xb4, 0xe9)),
+        key: rgb((0xe6, 0x9f, 0x00)),
+        sel_bg: rgb((0x1f, 0x4e, 0x79)),
+        cpu: Gradient([(0x3b, 0x7d, 0xd8), (0xf0, 0xe4, 0x42), (0xe6, 0x6a, 0x00)]),
+        mem: Gradient([(0x2c, 0x5e, 0x9e), (0x56, 0xb4, 0xe9), (0xc6, 0xe6, 0xf8)]),
+        rx: Gradient([(0x1f, 0x5f, 0x8b), (0x56, 0xb4, 0xe9), (0xc6, 0xe6, 0xf8)]),
+        tx: Gradient([(0x8a, 0x4a, 0x6e), (0xcc, 0x79, 0xa7), (0xf0, 0xc8, 0xde)]),
+        rd: Gradient([(0x1f, 0x5f, 0x8b), (0x00, 0x72, 0xb2), (0x9c, 0xcf, 0xf0)]),
+        wr: Gradient([(0x9a, 0x6a, 0x00), (0xe6, 0x9f, 0x00), (0xf8, 0xd8, 0x8a)]),
+        lat: Gradient([(0x3b, 0x7d, 0xd8), (0xf0, 0xe4, 0x42), (0xe6, 0x6a, 0x00)]),
+        ok: rgb((0x56, 0xb4, 0xe9)),
+        warn: rgb((0xf0, 0xe4, 0x42)),
+        bad: rgb((0xe6, 0x6a, 0x00)),
+        meter_empty: rgb((0x2a, 0x2e, 0x36)),
+        mono: false,
     },
 ];
+
+/// Used instead of the selected theme in monochrome mode. The colours only
+/// tag roles until the end of the frame, where `ui::monochrome` turns them
+/// into attributes (dim, bold, reverse) and clears every colour.
+pub const MONO: Theme = Theme {
+    name: "mono",
+    bg: Color::Reset,
+    fg: Color::Reset,
+    dim: Color::Indexed(8),
+    border: Color::Indexed(8),
+    title: Color::Indexed(15),
+    key: Color::Indexed(15),
+    sel_bg: Color::Indexed(7),
+    cpu: Gradient([(0xff, 0xff, 0xff); 3]),
+    mem: Gradient([(0xff, 0xff, 0xff); 3]),
+    rx: Gradient([(0xff, 0xff, 0xff); 3]),
+    tx: Gradient([(0xff, 0xff, 0xff); 3]),
+    rd: Gradient([(0xff, 0xff, 0xff); 3]),
+    wr: Gradient([(0xff, 0xff, 0xff); 3]),
+    lat: Gradient([(0xff, 0xff, 0xff); 3]),
+    ok: Color::Reset,
+    warn: Color::Indexed(15),
+    bad: Color::Indexed(15),
+    meter_empty: Color::Indexed(8),
+    mono: true,
+};
 
 pub fn by_name(name: &str) -> Option<usize> {
     THEMES.iter().position(|t| t.name.eq_ignore_ascii_case(name))

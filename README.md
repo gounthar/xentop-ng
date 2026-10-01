@@ -26,12 +26,17 @@ per disk and per network interface.
 - **Network and disk**: throughput graphs for traffic to/from VMs and for
   reads/writes, with IOPS and peaks.
 - **Disk latency**: read/write service time from tapdisk3, with history.
-- **Domain list**: sortable and filterable, with CPU meter, CPU history,
-  memory, network, disk throughput, IOPS and latency. Columns adapt to the
-  terminal width.
-- **Domain details** (`⏎`): per-vCPU load, per-disk IOPS/throughput/latency,
-  per-vif traffic, packets and errors.
-- **Themes**: `btop`, `xcp-ng`, `dracula`, `gruvbox`.
+- **Domain list**: filterable, with CPU meter, CPU history, memory,
+  network, disk throughput, IOPS and latency. Sort by any column (click its
+  title, or `s`). Pick and reorder columns with `o`; when the terminal is
+  too narrow, the least important ones step aside and the title says how
+  many.
+- **Domain details** (`⏎`): per-vCPU load, memory history, per-disk
+  IOPS/throughput/latency, per-vif traffic, packets and errors.
+- **Themes**: `btop`, `xcp-ng`, `dracula`, `gruvbox`, and `colorblind`.
+  `NO_COLOR` is honoured (see [Accessibility](#accessibility)).
+- **Remembers your setup**: theme, boxes, sort, columns and refresh rate
+  are kept in a [config file](#configuration).
 - **Domains only**: `5` (or `--domains-only`) hides every other box; `5`
   again brings them back.
 - **Mouse**: click to select, double-click for details, wheel to scroll.
@@ -155,6 +160,9 @@ dist/package.sh v0.1.0        # or: release archives in build/out/release/
 - **Fallback files:** stats files in world-writable `/dev/shm` are only
   trusted if they and their directory are root-owned, opened without
   following symlinks, and belong to a live tapdisk.
+- **Config file as root:** only read or written if root owns it (and its
+  directory) and nobody else can write to it; symlinks aren't followed.
+  This matters if `sudo` keeps another user's `$HOME`.
 - **sudo:** don't grant xentop-ng to other users through `sudo`. If you do
   anyway, `--lib` only accepts root-owned files in root-owned directories.
 
@@ -162,30 +170,94 @@ Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## Keys
 
+`?` shows all of them, grouped like this.
+
 | Key | Action |
 |---|---|
-| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | select domain |
+| **Navigate** | |
+| `↑` `↓` / `j` `k`, wheel | select domain |
+| `PgUp` `PgDn`, `g` `G` | page / first / last |
 | `⏎`, `space`, double-click | domain details |
-| `s` `S` / `←` `→` | next / previous sort column |
+| `esc` | close details / clear filter |
+| **Sort and filter** | |
+| `s` `S` / `←` `→` | next / previous sort column (among those on screen) |
+| click a column title | sort by it; click again to reverse |
 | `c` `m` `n` `d` `l` | sort by cpu, memory, network, disk, latency |
 | `r` | reverse sort |
 | `0` | pin Domain-0 on top |
 | `/` or `f` | filter by name or id |
+| **View** | |
 | `1` `2` `3` `4` | toggle cpu / mem / net / disk boxes |
 | `5` | domains only; press again to bring the boxes back (`--domains-only` starts that way) |
+| `o` | column chooser: `space` show/hide, `J` `K` (or `⇧↑` `⇧↓`) move, `d` defaults; mouse works too |
+| `t` `T` | next / previous theme |
+| `i` | data sources: what libxenstat provides, what comes from fallbacks |
+| **Sampling and settings** | |
 | `+` `-` | slower / faster refresh |
 | `p` | pause |
-| `t` `T` | cycle themes |
-| `i` | data sources: what libxenstat provides, what comes from fallbacks |
-| `?` | help |
-| `q` | quit |
+| `W` | save settings now (they are also saved on quit, see below) |
+| `?`, `h`, `F1` | help (`↑` `↓` scroll it on small terminals) |
+| `q`, `ctrl-c` | quit |
+
+The bottom line of the domain list shows the most useful of these, as many
+as fit, and always `? help`. Short messages (theme changed, settings saved,
+a problem with the config file) appear for a few seconds in the top right.
+
+## Configuration
+
+Preferences live in `$XDG_CONFIG_HOME/xentop-ng/config.toml`, which is
+usually `~/.config/xentop-ng/config.toml` (`/root/.config/...` in dom0).
+
+- **Saved on quit**, but only what you changed in the UI. Command-line
+  flags such as `--theme` apply to that run only. `W` saves everything as
+  it is right now, flags included.
+- **Loaded at start**, then command-line flags override it.
+- **Forgiving**: a missing file means defaults; a bad value falls back to
+  its default with a warning in the header; unknown keys are ignored; a
+  malformed file never stops xentop-ng from starting. Delete the file to
+  reset everything.
+- Written atomically (temporary file, then rename), mode `0600`.
+- `--config PATH` uses another file; `--no-config` neither reads nor
+  writes one. Batch mode ignores the file.
+
+```toml
+theme = "colorblind"         # btop, xcp-ng, dracula, gruvbox, colorblind
+colors = "auto"              # auto, truecolor, 256, mono
+interval = 2.0               # seconds
+boxes = ["cpu", "disk"]      # cpu, mem, net, disk; [] = domains only
+sort = "iops"                # a column id, or net / disk (totals)
+reverse = false
+dom0_first = true
+# Display order; columns that aren't listed keep their default place.
+columns = ["id", "name", "state", "cpu", "cpu_hist", "mem", "iops", "lat",
+           "disk_rd", "disk_wr", "net_rx", "net_tx", "vcpu"]
+hidden_columns = ["vcpu"]
+```
+
+Column ids: `id`, `name`, `state`, `vcpu`, `cpu`, `cpu_hist`, `mem`,
+`net_rx`, `net_tx`, `disk_rd`, `disk_wr`, `iops`, `lat`. `id` and `name`
+are always shown.
+
+## Accessibility
+
+- **`NO_COLOR`** (any non-empty value, see [no-color.org](https://no-color.org))
+  or `--colors mono`: no colours at all. Meters keep their shape (`■■■···`),
+  the pCPU heatmap uses shades (`·░▒▓█`), the selected row and badges are
+  in reverse video, secondary text is dim. An explicit `--colors` or a
+  `colors` setting in the config file wins over `NO_COLOR`.
+- **`colorblind` theme**: blue → yellow → orange ramps (Okabe-Ito colours)
+  instead of green → red.
+- **Not colour alone**: domain state has a symbol (`●` running, `○` idle,
+  `‖` paused, `✖` crashed), and latency of 5 ms or more is flagged with `!`
+  in the list and the domain details.
 
 ## Other options
 
 - `--colors 256`: for terminals without 24-bit colour. This is the default
-  on the Linux console.
+  on the Linux console. `--colors mono`: no colour (as with `NO_COLOR`).
 - `--theme NAME`: start with a given theme.
 - `-d SECS`: refresh interval.
+- `--config PATH`, `--no-config`: see [Configuration](#configuration).
 
 ## Batch mode
 
@@ -206,7 +278,9 @@ src/
   source/demo.rs      simulated host
   model.rs            raw counters → per-interval rates
   history.rs          ring buffers behind the graphs
+  config.rs           preferences file
   ui/                 layout, boxes, braille graphs, meters, heatmap
+  ui/columns.rs       domain table columns: one entry per column
 libxenstat/           libxenstat patches: XCP-ng 4.17 and upstream versions
 build/                container builds for XCP-ng and deploy script
 dist/                 release packaging and the XCP-ng installer
