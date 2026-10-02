@@ -3,7 +3,7 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
-## [Unreleased]
+## [0.4.1] - 2026-10-02
 
 ### Fixed
 
@@ -21,6 +21,12 @@ release binaries are on the [releases page](https://github.com/olivierlambert/xe
   controls, the symlink could be swapped in between and another library
   loaded as root (relevant when xentop-ng is granted through sudo). It now
   loads the file it checked.
+
+### Internal
+
+- Code reorganised with no change in behavior: the UI is split into one
+  file per panel, the Xen libraries are loaded in one place, and reading
+  libxenstat is separate from filling its gaps (now unit-tested).
 
 ## [0.4.0] - 2026-10-02
 
@@ -129,6 +135,7 @@ First public release: same as 0.1.0, with build provenance attestations.
 Initial release: a btop-style Xen monitor with fallbacks for what stock
 libxenstat lacks, security hardening, CI and signed release builds.
 
+[0.4.1]: https://github.com/olivierlambert/xentop-ng/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.0...v0.3.1
