@@ -238,7 +238,8 @@ pub struct HostRates {
     pub num_cpus: u32,
     pub cpu_mhz: u64,
     /// Per-pCPU busy fraction (0..1); empty when unavailable.
-    pub pcpu_busy: Vec<f64>,
+    pub pcpu_busy: Vec<Option<f64>>,
+    pub pcpu_samples: Coverage,
     /// Hypervisor CPU id for each entry of `pcpu_busy`.
     pub pcpu_ids: Vec<u32>,
     /// Whole-host busy fraction (0..1).
@@ -716,12 +717,24 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
         (Some(pi), Some(ci)) if !ci.is_empty() => {
             let prev_idle: HashMap<u32, u64> = pi.iter().copied().collect();
             for &(id, c) in ci {
-                let p = prev_idle.get(&id).copied().unwrap_or(c);
+                let busy = prev_idle
+                    .get(&id)
+                    .and_then(|&p| c.checked_sub(p))
+                    .map(|idle| (1.0 - idle as f64 / dt_ns).clamp(0.0, 1.0));
                 host.pcpu_ids.push(id);
-                host.pcpu_busy
-                    .push((1.0 - d(c, p) as f64 / dt_ns).clamp(0.0, 1.0));
+                host.pcpu_busy.push(busy);
             }
-            host.cpu_busy = host.pcpu_busy.iter().sum::<f64>() / host.pcpu_busy.len() as f64;
+            host.pcpu_samples = Coverage {
+                total: host.pcpu_busy.len(),
+                available: host.pcpu_busy.iter().flatten().count(),
+            };
+            if host.pcpu_samples.available > 0 {
+                host.cpu_busy =
+                    host.pcpu_busy.iter().flatten().sum::<f64>() / host.pcpu_samples.available as f64;
+            } else {
+                host.cpu_estimated = true;
+                host.cpu_busy = (dom_cpu_total / cur.num_cpus.max(1) as f64).clamp(0.0, 1.0);
+            }
         }
         _ => {
             host.cpu_estimated = true;
@@ -867,6 +880,32 @@ mod rate_tests {
         );
         // No previous sample for "new": no bogus 400% spike.
         assert_eq!(r.domains[0].cpu_pct, 0.0);
+    }
+
+    #[test]
+    fn pcpu_hotplug_and_resets_have_no_invented_utilization() {
+        let t = Instant::now();
+        let mut a = snap(t, vec![]);
+        let mut b = snap(t + Duration::from_secs(1), vec![]);
+        a.pcpu_idle_ns = Some(vec![(0, 1_000_000_000), (2, 2_000_000_000)]);
+        b.pcpu_idle_ns = Some(vec![(0, 2_000_000_000), (3, 3_000_000_000)]);
+        let r = compute(&a, &b);
+        assert_eq!(r.host.pcpu_ids, vec![0, 3]);
+        assert_eq!(r.host.pcpu_busy, vec![Some(0.0), None]);
+        assert_eq!(r.host.cpu_busy, 0.0);
+        assert_eq!(
+            r.host.pcpu_samples,
+            Coverage {
+                available: 1,
+                total: 2
+            }
+        );
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json["host"]["pcpu_busy"][1].is_null());
+        b.pcpu_idle_ns = Some(vec![(0, 1), (2, 1)]);
+        let r = compute(&a, &b);
+        assert_eq!(r.host.pcpu_busy, vec![None, None]);
+        assert!(r.host.cpu_estimated);
     }
 
     #[test]

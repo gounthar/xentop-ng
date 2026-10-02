@@ -528,3 +528,10 @@ and shows `-` when no expected disk has a valid interval. Missing history is
 marked with a dot, distinct from an idle zero. The data-sources panel shows
 latency and steal coverage. A readable VIF inventory containing no interfaces
 is not applicable; an unreadable inventory is missing, not a successful read.
+
+pCPU utilization needs two monotonic counters for the same physical CPU ID.
+Newly online CPUs and reset counters show `-` until a baseline exists; JSON
+`host.pcpu_busy` entries are nullable and `host.pcpu_samples` reports coverage.
+The host average excludes unknown CPUs (and is marked partial); when none
+have valid intervals it uses the existing domain-based estimate. CPU history
+is keyed by physical ID, so hotplug cannot transfer history between cores.

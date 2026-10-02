@@ -118,7 +118,7 @@ pub struct DomHistory {
 #[derive(Default)]
 pub struct History {
     pub cpu: Series,
-    pub pcpu: Vec<Series>,
+    pub pcpu: HashMap<u32, Series>,
     pub mem: Series,
     pub rx: Series,
     pub tx: Series,
@@ -144,11 +144,13 @@ impl History {
         self.tick += 1;
         let h = &r.host;
         self.cpu.push(h.cpu_busy * 100.0);
-        if self.pcpu.len() != h.pcpu_busy.len() {
-            self.pcpu = vec![Series::default(); h.pcpu_busy.len()];
-        }
-        for (s, v) in self.pcpu.iter_mut().zip(&h.pcpu_busy) {
-            s.push(v * 100.0);
+        self.pcpu.retain(|id, _| h.pcpu_ids.contains(id));
+        for (&id, v) in h.pcpu_ids.iter().zip(&h.pcpu_busy) {
+            let s = self.pcpu.entry(id).or_default();
+            if v.is_none() {
+                *s = Series::default();
+            }
+            s.push_optional(v.map(|v| v * 100.0));
         }
         self.mem
             .push(h.mem_total.saturating_sub(h.mem_free) as f64 / h.mem_total.max(1) as f64 * 100.0);
@@ -246,6 +248,21 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn pcpu_history_follows_ids_when_membership_changes() {
+        let mut h = History::default();
+        let mut r = Rates::default();
+        r.host.pcpu_ids = vec![0, 2];
+        r.host.pcpu_busy = vec![Some(0.1), Some(0.8)];
+        h.record(&r);
+        r.host.pcpu_ids = vec![3, 0];
+        r.host.pcpu_busy = vec![None, Some(0.2)];
+        h.record(&r);
+        assert!(!h.pcpu.contains_key(&2));
+        assert_eq!(h.pcpu[&0].tail(2), vec![10.0, 20.0]);
+        assert!(h.pcpu[&3].tail(1)[0].is_nan());
     }
 
     #[test]

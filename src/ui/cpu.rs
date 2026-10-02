@@ -33,7 +33,7 @@ pub(super) fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         return;
     }
 
-    let n = app.hist.pcpu.len();
+    let n = h.pcpu_ids.len();
     let rows = inner.height as usize;
     let budget = (inner.width as usize * 11) / 20;
     let lab_w = format!("C{}", h.pcpu_ids.iter().max().copied().unwrap_or(0)).len();
@@ -60,7 +60,14 @@ pub(super) fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     let busy = h.cpu_busy * 100.0;
     let mut lbl = vec![
         Span::styled(" total ", Style::new().fg(th.fg).add_modifier(Modifier::BOLD)),
-        bold(fmt::pct(busy), th.cpu.at(h.cpu_busy)),
+        bold(
+            if h.cpu_estimated {
+                fmt::pct(busy)
+            } else {
+                h.pcpu_samples.label(fmt::pct(busy))
+            },
+            th.cpu.at(h.cpu_busy),
+        ),
     ];
     if h.cpu_estimated {
         lbl.push(dim(th, " est."));
@@ -98,6 +105,7 @@ pub(super) fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             .iter()
             .copied()
             .zip(h.pcpu_busy.iter().copied())
+            .filter_map(|(id, v)| v.map(|v| (id, v)))
             .collect();
         hot.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut sp = vec![dim(th, " hottest ")];
@@ -124,16 +132,21 @@ pub(super) fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             if y >= inner.y + inner.height {
                 continue;
             }
-            let v = h.pcpu_busy.get(i).copied().unwrap_or(0.0);
+            let v = h.pcpu_busy.get(i).copied().flatten();
             let id = h.pcpu_ids.get(i).copied().unwrap_or(i as u32);
             let mut sp = vec![dim(th, format!("{:<w$} ", format!("C{id}"), w = lab_w))];
             if gw > 0 {
-                sp.extend(mini_graph(&app.hist.pcpu[i].tail(gw * 2), 100.0, gw, &th.cpu));
+                sp.extend(mini_graph(
+                    &app.hist.pcpu.get(&id).map(|s| s.tail(gw * 2)).unwrap_or_default(),
+                    100.0,
+                    gw,
+                    &th.cpu,
+                ));
                 sp.push(Span::raw(" "));
             }
             sp.push(Span::styled(
-                format!("{:>4.0}%", v * 100.0),
-                Style::new().fg(th.cpu.at(v)),
+                v.map_or_else(|| "    -".into(), |v| format!("{:>4.0}%", v * 100.0)),
+                Style::new().fg(v.map_or(th.dim, |v| th.cpu.at(v))),
             ));
             put(buf, x, y, ew.saturating_sub(2) as u16, &Line::from(sp));
         }
@@ -260,7 +273,10 @@ fn pcpu_heatmap(
         return;
     }
     let color = |i: usize| -> Option<Color> {
-        let v = *h.pcpu_busy.get(i)?;
+        let v = (*h.pcpu_busy.get(i)?).unwrap_or(f64::NAN);
+        if !v.is_finite() {
+            return Some(th.dim);
+        }
         // Idle cores stay dim so the busy ones stand out.
         Some(if v < 0.02 { th.meter_empty } else { th.cpu.at(v) })
     };
@@ -348,13 +364,18 @@ fn pcpu_shades(
             if x + fill as u16 > area.x + area.width {
                 break;
             }
-            let top = h.pcpu_busy.get(first + c).copied();
+            let top = h.pcpu_busy.get(first + c).copied().flatten();
             let bot = if half {
-                h.pcpu_busy.get(first + cols + c).copied()
+                h.pcpu_busy.get(first + cols + c).copied().flatten()
             } else {
                 None
             };
-            let Some(v) = top.map(|t| bot.map_or(t, |b| t.max(b))) else {
+            let Some(v) = top.map(|t| bot.map_or(t, |b| t.max(b))).or(bot) else {
+                if first + c < h.pcpu_busy.len() {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_char('·').set_fg(th.dim);
+                    }
+                }
                 continue;
             };
             let lvl = if v < 0.02 {
