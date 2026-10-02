@@ -64,7 +64,7 @@ pub(super) fn mem_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     // (cpu box hidden) shows them in full.
     let room = w.saturating_sub(4 + 1 + 7);
     let shown = doms.iter().take(bottom.saturating_sub(y) as usize).copied();
-    let longest = app.name_w.mem.hold(longest_name(shown), Instant::now());
+    let longest = app.frame.name_w.mem.hold(longest_name(shown), Instant::now());
     let nw = name_width(longest, room, (w / 3).clamp(8, 16) - 4) + 4;
     let mw = w.saturating_sub(nw + 1 + 7);
     for d in doms {

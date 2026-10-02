@@ -44,6 +44,26 @@ pub struct ChooserHits {
     pub down_x: u16,
 }
 
+/// What `ui::draw` records about the frame it drew: where things are on
+/// screen, for mouse hit-testing, and layout carried over to the next
+/// frame. Written while drawing; read by input handling and the next frame.
+#[derive(Default)]
+pub struct FrameState {
+    /// Where the domain rows were drawn last frame, for mouse hit-testing.
+    pub table_rows: Rect,
+    pub table_offset: usize,
+    /// Table header row and each column's (x, width, id) there.
+    pub table_head: Rect,
+    pub head_cells: Vec<(u16, u16, &'static str)>,
+    /// Columns that are enabled but didn't fit last frame.
+    pub cols_dropped: Vec<&'static str>,
+    /// Area of the open popup, if any: clicks outside it close it.
+    pub popup_area: Rect,
+    pub chooser_hits: ChooserHits,
+    /// Name column widths, held across frames.
+    pub name_w: crate::ui::NameWidths,
+}
+
 pub struct App {
     pub source: Box<dyn Source>,
     pub source_desc: String,
@@ -67,7 +87,6 @@ pub struct App {
     pub info: bool,
     /// Column chooser (`o`) open, with the cursor on this column.
     pub chooser: Option<usize>,
-    pub chooser_hits: ChooserHits,
     /// Every registry column in display order, and whether it is shown.
     pub columns: Vec<(&'static str, bool)>,
     /// Map colours to the xterm 256-colour palette at the end of each frame.
@@ -87,19 +106,8 @@ pub struct App {
     pub toast: Option<Toast>,
     pub config: Option<ConfigState>,
     pub quit: bool,
-    /// Where the domain rows were drawn last frame, for mouse hit-testing.
-    pub table_rows: Rect,
-    pub table_offset: usize,
-    /// Table header row and each column's (x, width, id) there.
-    pub table_head: Rect,
-    pub head_cells: Vec<(u16, u16, &'static str)>,
-    /// Columns that are enabled but didn't fit last frame.
-    pub cols_dropped: Vec<&'static str>,
-    /// Area of the open popup, if any: clicks outside it close it.
-    pub popup_area: Rect,
     last_click: Option<(Instant, u32)>,
-    /// Name column widths, held across frames.
-    pub name_w: crate::ui::NameWidths,
+    pub frame: FrameState,
 }
 
 impl App {
@@ -125,7 +133,6 @@ impl App {
             help_scroll: 0,
             info: false,
             chooser: None,
-            chooser_hits: ChooserHits::default(),
             columns: columns::defaults(),
             ansi256: false,
             mono: false,
@@ -139,14 +146,8 @@ impl App {
             toast: None,
             config: None,
             quit: false,
-            table_rows: Rect::default(),
-            table_offset: 0,
-            table_head: Rect::default(),
-            head_cells: Vec::new(),
-            cols_dropped: Vec::new(),
-            popup_area: Rect::default(),
             last_click: None,
-            name_w: Default::default(),
+            frame: FrameState::default(),
         }
     }
 
@@ -317,10 +318,11 @@ impl App {
     /// Sort keys `s`/`S` step through: the sortable columns on screen, in
     /// their order (all enabled ones before the first frame).
     pub fn sort_cycle(&self) -> Vec<&'static str> {
-        let on_screen: Vec<&'static Column> = if self.head_cells.is_empty() {
+        let on_screen: Vec<&'static Column> = if self.frame.head_cells.is_empty() {
             self.enabled_columns()
         } else {
-            self.head_cells
+            self.frame
+                .head_cells
                 .iter()
                 .filter_map(|c| columns::column(c.2))
                 .collect()
@@ -406,7 +408,7 @@ impl App {
             self.close_popups();
             return;
         }
-        let page = self.table_rows.height.max(1) as isize;
+        let page = self.frame.table_rows.height.max(1) as isize;
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc => {
@@ -487,7 +489,7 @@ impl App {
         self.help = false;
         self.info = false;
         self.chooser = None;
-        self.popup_area = Rect::default();
+        self.frame.popup_area = Rect::default();
     }
 
     fn chooser_key(&mut self, k: KeyEvent) {
@@ -562,7 +564,7 @@ impl App {
                 MouseEventKind::ScrollUp => self.chooser_key(KeyEvent::from(KeyCode::Up)),
                 MouseEventKind::ScrollDown => self.chooser_key(KeyEvent::from(KeyCode::Down)),
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if self.chooser.is_some() && self.popup_area.contains(pos) {
+                    if self.chooser.is_some() && self.frame.popup_area.contains(pos) {
                         self.chooser_click(pos);
                     } else {
                         self.close_popups();
@@ -576,8 +578,9 @@ impl App {
             MouseEventKind::ScrollUp => self.move_sel(-1),
             MouseEventKind::ScrollDown => self.move_sel(1),
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.table_head.contains(pos) {
+                if self.frame.table_head.contains(pos) {
                     let hit = self
+                        .frame
                         .head_cells
                         .iter()
                         .find(|c| m.column >= c.0 && m.column < c.0 + c.1);
@@ -586,11 +589,11 @@ impl App {
                     }
                     return;
                 }
-                let r = self.table_rows;
+                let r = self.frame.table_rows;
                 if !r.contains(pos) {
                     return;
                 }
-                let idx = self.table_offset + (m.row - r.y) as usize;
+                let idx = self.frame.table_offset + (m.row - r.y) as usize;
                 let vis = self.visible();
                 let Some(d) = vis.get(idx) else { return };
                 let id = d.id;
@@ -608,7 +611,7 @@ impl App {
     }
 
     fn chooser_click(&mut self, pos: Position) {
-        let h = self.chooser_hits;
+        let h = self.frame.chooser_hits;
         if !h.rows.contains(pos) {
             return;
         }
@@ -717,8 +720,8 @@ mod tests {
     #[test]
     fn header_click_sorts_then_reverses() {
         let mut a = demo_app();
-        a.table_head = Rect::new(0, 5, 100, 1);
-        a.head_cells = vec![
+        a.frame.table_head = Rect::new(0, 5, 100, 1);
+        a.frame.head_cells = vec![
             (0, 4, "id"),
             (5, 14, "name"),
             (20, 12, "cpu_hist"),

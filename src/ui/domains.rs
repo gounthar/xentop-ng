@@ -68,6 +68,7 @@ pub(super) fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect
     // Every domain, filtered out or not: typing a filter doesn't move the
     // columns.
     let name_w = app
+        .frame
         .name_w
         .table
         .hold(longest_name(r.domains.iter()), Instant::now());
@@ -116,11 +117,11 @@ pub(super) fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect
     block = block.title_bottom(hints);
     let inner = block.inner(area);
     block.render(area, buf);
-    app.cols_dropped = dropped;
-    app.head_cells.clear();
-    app.table_head = Rect::default();
+    app.frame.cols_dropped = dropped;
+    app.frame.head_cells.clear();
+    app.frame.table_head = Rect::default();
     if inner.height < 2 {
-        app.table_rows = Rect::default();
+        app.frame.table_rows = Rect::default();
         return;
     }
 
@@ -142,15 +143,15 @@ pub(super) fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect
         };
         let shown = (*w as u16).min((inner.x + inner.width).saturating_sub(x));
         buf.set_stringn(x, inner.y, pad(t, *w, c.right), shown as usize, style);
-        app.head_cells.push((x, shown, c.id));
+        app.frame.head_cells.push((x, shown, c.id));
         x = x.saturating_add(*w as u16 + 1);
     }
-    app.table_head = Rect::new(inner.x, inner.y, inner.width, 1);
+    app.frame.table_head = Rect::new(inner.x, inner.y, inner.width, 1);
 
     let rows = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
     let n_rows = rows.height as usize;
     let sel_idx = app.selected.and_then(|id| vis_ids.iter().position(|&x| x == id));
-    let mut off = app.table_offset.min(vis_ids.len().saturating_sub(n_rows));
+    let mut off = app.frame.table_offset.min(vis_ids.len().saturating_sub(n_rows));
     if let Some(s) = sel_idx {
         if s < off {
             off = s;
@@ -158,8 +159,8 @@ pub(super) fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect
             off = s + 1 - n_rows;
         }
     }
-    app.table_offset = off;
-    app.table_rows = rows;
+    app.frame.table_offset = off;
+    app.frame.table_rows = rows;
 
     let by_id: std::collections::HashMap<u32, &DomRates> = r.domains.iter().map(|d| (d.id, d)).collect();
     for (i, id) in vis_ids.iter().skip(off).take(n_rows).enumerate() {

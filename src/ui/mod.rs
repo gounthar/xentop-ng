@@ -490,7 +490,7 @@ mod tests {
             .content
             .iter()
             .all(|c| c.fg == Color::Reset && c.bg == Color::Reset));
-        let y = a.table_rows.y;
+        let y = a.frame.table_rows.y;
         let reversed = (0..200)
             .filter(|&x| buf[(x, y)].modifier.contains(Modifier::REVERSED))
             .count();
