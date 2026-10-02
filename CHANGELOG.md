@@ -3,7 +3,7 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
-## [Unreleased]
+## [0.3.2] - 2026-10-02
 
 ### Fixed
 
@@ -17,7 +17,7 @@ release binaries are on the [releases page](https://github.com/olivierlambert/xe
     grows to the longest name, leaving the CPU history at least half of
     the spare width. Long names never push other columns out;
   - SR names in the SR view (`v`) use the width left over past 20
-    columns.
+    columns;
   - these widths grow at once but shrink only after 30 s, so short-lived
     VMs (CI jobs, backups) don't shift the columns as they come and go.
 
@@ -100,6 +100,7 @@ First public release: same as 0.1.0, with build provenance attestations.
 Initial release: a btop-style Xen monitor with fallbacks for what stock
 libxenstat lacks, security hardening, CI and signed release builds.
 
+[0.3.2]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/olivierlambert/xentop-ng/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/olivierlambert/xentop-ng/compare/v0.2.1...v0.2.2
