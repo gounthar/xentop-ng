@@ -106,10 +106,17 @@ impl Collector {
         }
     }
 
-    pub fn request(&mut self) {
+    pub fn request(&mut self) -> bool {
         if !self.waiting && !self.stopped && self.requests.try_send(()).is_ok() {
             self.waiting = true;
+            true
+        } else {
+            false
         }
+    }
+
+    pub fn waiting(&self) -> bool {
+        self.waiting && !self.stopped
     }
 
     pub fn poll(&mut self) -> Option<Update> {

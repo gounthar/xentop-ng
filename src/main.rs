@@ -280,8 +280,9 @@ fn run_ui(open: impl FnOnce() -> Result<Box<dyn Source>> + Send + 'static, o: &O
                 last_draw = Instant::now();
                 redraw = false;
             }
-            // Poll worker results regularly, including during input bursts.
-            let wait = Duration::from_millis(50);
+            // Wake quickly for an outstanding sample, otherwise sleep
+            // until the next sample or clock redraw.
+            let wait = app.event_wait();
             if event::poll(wait)? {
                 redraw = true;
                 match event::read()? {

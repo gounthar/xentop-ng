@@ -240,6 +240,10 @@ impl App {
 
     /// Poll without waiting; at most one collection can be in flight.
     pub fn tick(&mut self) -> bool {
+        self.tick_at(Instant::now())
+    }
+
+    fn tick_at(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if let Some(update) = self.collector.poll() {
             changed = true;
@@ -250,6 +254,7 @@ impl App {
                     status,
                     description,
                 } => {
+                    self.next_sample = now;
                     self.source_desc = description;
                     self.status = status;
                     for snap in history {
@@ -262,15 +267,33 @@ impl App {
                     }
                     self.status = status;
                     self.error = None;
+                    // Establish the first rates promptly, even at a long
+                    // configured interval. Later samples keep normal cadence.
+                    if !self.paused && self.rates.is_none() {
+                        self.next_sample = now + self.interval.min(Duration::from_millis(250));
+                    }
                 }
                 Update::Sample(Err(e)) => self.error = Some(e),
             }
         }
-        if !self.paused && Instant::now() >= self.next_sample {
-            self.collector.request();
-            self.next_sample = Instant::now() + self.interval;
+        if !self.paused && now >= self.next_sample && self.collector.request() {
+            self.next_sample = now + self.interval;
         }
         changed
+    }
+
+    /// Poll quickly only while a result is outstanding; idle UI sleeps
+    /// until a sample deadline or the one-second clock redraw.
+    pub fn event_wait(&self) -> Duration {
+        if self.collector.waiting() {
+            Duration::from_millis(50)
+        } else if self.paused {
+            Duration::from_secs(1)
+        } else {
+            self.next_sample
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(1))
+        }
     }
 
     pub fn sample_age(&self) -> Duration {
@@ -799,5 +822,94 @@ mod tests {
         );
         assert!(!a.enabled_columns().iter().any(|c| c.id == "state"));
         assert_ne!(a.prefs().columns, columns::defaults());
+    }
+
+    struct GatedSource {
+        snap: Snapshot,
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl crate::source::Source for GatedSource {
+        fn sample(&mut self) -> anyhow::Result<Snapshot> {
+            self.started.send(()).unwrap();
+            self.release.recv().unwrap();
+            self.snap.at += Duration::from_secs(1);
+            Ok(self.snap.clone())
+        }
+        fn describe(&self) -> String {
+            "gated".into()
+        }
+    }
+    fn drive_until(app: &mut App, now: Instant, done: impl Fn(&App) -> bool) {
+        let limit = Instant::now() + Duration::from_secs(2);
+        loop {
+            app.tick_at(now);
+            if done(app) {
+                break;
+            }
+            assert!(Instant::now() < limit, "worker did not respond");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn gated_app(
+        interval: Duration,
+    ) -> (
+        App,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+        Snapshot,
+    ) {
+        use crate::source::Source;
+        let mut demo = DemoSource::new(&DemoConfig::default());
+        let snap = demo.sample().unwrap();
+        let source_snap = snap.clone();
+        let (started, starts) = std::sync::mpsc::channel();
+        let (release, releases) = std::sync::mpsc::channel();
+        let collector = Collector::spawn(
+            move || {
+                Ok(Box::new(GatedSource {
+                    snap: source_snap,
+                    started,
+                    release: releases,
+                }))
+            },
+            0,
+        );
+        (App::new(collector, interval, 0), starts, release, snap)
+    }
+    #[test]
+    fn slow_samples_do_not_skip_the_next_deadline() {
+        let (mut a, starts, release, snap) = gated_app(Duration::from_secs(1));
+        let t = Instant::now();
+        a.ingest(snap);
+        drive_until(&mut a, t, |a| a.source_desc == "gated");
+        starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        let due = a.next_sample;
+        assert_eq!(due, t + Duration::from_secs(1));
+        a.tick_at(due);
+        assert_eq!(a.next_sample, due, "ignored request must not move deadline");
+        release.send(()).unwrap();
+        let finished = t + Duration::from_millis(1200);
+        drive_until(&mut a, finished, |a| a.rates.is_some());
+        starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(a.next_sample, finished + Duration::from_secs(1));
+        release.send(()).unwrap();
+    }
+    #[test]
+    fn initial_rates_use_two_quick_samples_and_idle_wait_is_long() {
+        let (mut a, starts, release, _) = gated_app(Duration::from_secs(60));
+        let t = Instant::now();
+        drive_until(&mut a, t, |a| a.source_desc == "gated");
+        starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        release.send(()).unwrap();
+        drive_until(&mut a, t, |a| a.prev.is_some());
+        assert!(a.rates.is_none());
+        assert_eq!(a.next_sample, t + Duration::from_millis(250));
+        a.tick_at(t + Duration::from_millis(250));
+        starts.recv_timeout(Duration::from_secs(2)).unwrap();
+        release.send(()).unwrap();
+        drive_until(&mut a, t + Duration::from_millis(250), |a| a.rates.is_some());
+        assert_eq!(a.event_wait(), Duration::from_secs(1));
+        assert!(!a.collector.waiting());
     }
 }
