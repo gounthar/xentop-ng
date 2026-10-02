@@ -52,8 +52,8 @@ pub struct DataStatus {
     /// never has these: `Fallback` means read from xenstore.
     pub storage: Avail,
     /// Steal time (vCPUs runnable but not running). Needs a hypervisor
-    /// patch, not just libxenstat, so it is left out of the header's
-    /// partial/fallback marker; the `i` popup still shows it.
+    /// patch for full support. Missing steal is normal on unsupported
+    /// hypervisors; partial coverage still marks incomplete measurements.
     pub steal: Avail,
     /// SR/VDI/network names. Extra, never a gap: not part of `degraded`.
     pub xapi: XapiState,
@@ -61,6 +61,8 @@ pub struct DataStatus {
 
 impl DataStatus {
     pub fn degraded(&self) -> bool {
+        // Missing steal can mean the hypervisor does not support it. Partial
+        // steal means a supported measurement is incomplete and merits a warning.
         [self.pcpu, self.vbd_latency, self.vifs, self.storage]
             .iter()
             .any(|a| matches!(a, Avail::Missing | Avail::Partial))

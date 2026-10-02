@@ -169,10 +169,11 @@ first block in tables, in full in the details) or backing paths.
 `--no-xapi` turns it off.
 
 When per-pCPU load, disk latency or VIFs come from a fallback or are
-missing, the header shows a discreet **◐** marker. Storage mapping and steal
-time don't count: the first always comes from xenstore, the second depends
-on the hypervisor. Press **`i`** for the data sources panel,
-which says where each metric comes from. `--batch` output includes the same
+missing, the header shows a discreet **◐** marker. Missing storage mapping
+and partial measurement coverage also mark degraded data. Xenstore mapping
+is not a fallback warning, and missing steal time is normal on unsupported
+hypervisors; partial steal coverage does warn. Press **`i`** for the data sources
+panel, which says where each metric comes from. `--batch` output includes the same
 information under `"sources"`.
 
 Disks are named the way the guest sees them with PV drivers: HVM disks
@@ -274,6 +275,47 @@ wrong, and the `"sources"` part of `xentop-ng --batch -n 1`.
   anyway, `--lib` only accepts root-owned files in root-owned directories.
 
 Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
+### Counter identity and recovery
+
+VM identity is read from xenstore on each sample; XAPI is not required.
+Renames preserve history when a UUID is available. A transient UUID read failure
+keeps the last known identity while the name and CPU counters remain consistent.
+A different known UUID or CPU counter rollback starts a new baseline. Without
+a UUID, domid/name and counter rollback provide a conservative fallback. A restart
+entirely between samples whose identity and counters appear continuous cannot
+be identified reliably. Disk backing changes and failed reads also require a
+fresh baseline; collection errors are separate from disk-reported I/O errors.
+
+Interactive collection runs on a dedicated thread, including opening Xen
+libraries and xenstore. Only one sample can be in flight; input remains
+responsive and the header marks stale data. Quitting does not wait for a
+blocked collector. Startup errors exit cleanly; initialization gets a 250 ms grace
+period before the cancellable UI opens. A second sample is requested after
+250 ms (or the configured interval, if shorter) to establish rates quickly.
+The event loop polls while collection is outstanding and sleeps up to one
+second when idle. This isolates blocking calls, not C crashes: a separate
+collector process and privilege separation remain future work. Batch modes
+retain their synchronous sampling and output behavior.
+
+Measurement coverage is included in JSON: `disk_samples` counts valid disk
+intervals at host/domain/SR level. Its `pending` count tracks healthy new disks
+waiting for a baseline, excluded from `total` and from degraded coverage.
+`sources.vbd_latency_coverage` and `sources.steal_coverage` count available
+counters. `partial` is a source status.
+Disk rates are sums over valid devices; the UI marks partial sums with `*`
+and shows `-` when disks exist but none has a valid interval. Host, VM and SR
+disk graphs retain partial sums when at least one disk has a valid interval.
+Missing history is marked with a dot, distinct from an idle zero. The data-sources
+panel shows latency and steal coverage. A readable VIF inventory containing no interfaces
+is not applicable; an unreadable inventory is missing, not a successful read.
+
+pCPU utilization needs two monotonic counters for the same physical CPU ID.
+Newly online CPUs and reset counters show `-` until a baseline exists; JSON
+`host.pcpu_busy` entries are nullable and `host.pcpu_samples` reports coverage.
+The host average excludes unknown CPUs (and is marked partial); when none
+have valid intervals it uses the existing domain-based estimate. CPU history
+is keyed by physical ID, so hotplug cannot transfer history between cores.
 
 ## Keys
 
@@ -502,36 +544,3 @@ Ideas and possible next steps are in [IDEAS.md](IDEAS.md).
 
 GPL-2.0-only; see [LICENSE](LICENSE). The libxenstat patches follow the
 license of the Xen files they modify.
-
-### Counter identity and recovery
-
-VM identity is read from xenstore on each sample; XAPI is not required.
-Renames preserve history when a UUID is available. UUID changes, disappearing
-identity and CPU counter rollback start a new baseline. Without a UUID,
-domid/name and counter rollback provide a conservative fallback. A restart
-entirely between samples whose identity and counters appear continuous cannot
-be identified reliably. Disk backing changes and failed reads also require a
-fresh baseline; collection errors are separate from disk-reported I/O errors.
-
-Interactive collection runs on a dedicated thread, including opening Xen
-libraries and xenstore. Only one sample can be in flight; input remains
-responsive and the header marks stale data. Quitting does not wait for a
-blocked collector. This isolates blocking calls, not C crashes: a separate
-collector process and privilege separation remain future work. Batch modes
-retain their synchronous sampling and output behavior.
-
-Measurement coverage is included in JSON: `disk_samples` counts valid disk
-intervals at host/domain/SR level, and `sources.vbd_latency_coverage` and
-`sources.steal_coverage` count available counters. `partial` is a source status.
-Disk rates are sums over valid devices; the UI marks partial sums with `*`
-and shows `-` when no expected disk has a valid interval. Missing history is
-marked with a dot, distinct from an idle zero. The data-sources panel shows
-latency and steal coverage. A readable VIF inventory containing no interfaces
-is not applicable; an unreadable inventory is missing, not a successful read.
-
-pCPU utilization needs two monotonic counters for the same physical CPU ID.
-Newly online CPUs and reset counters show `-` until a baseline exists; JSON
-`host.pcpu_busy` entries are nullable and `host.pcpu_samples` reports coverage.
-The host average excludes unknown CPUs (and is marked partial); when none
-have valid intervals it uses the existing domain-based estimate. CPU history
-is keyed by physical ID, so hotplug cannot transfer history between cores.

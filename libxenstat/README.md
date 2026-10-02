@@ -177,3 +177,10 @@ links, non-regular files and invalid sizes are rejected; nonblocking opens
 prevent FIFOs from hanging the collector. Run `python3 tests/libxenstat/check-reader.py`
 to exercise the reader without a Xen host. Stock libraries must be updated
 separately: Rust fallback checks cannot protect reads already made by libxenstat.
+
+Read-only validation on 2026-10-02 checked an XCP-ng 8.3 host running
+`xcp-ng-release-8.3.0-37` and `blktap-3.55.5-6.7.xcpng8.3`. Its seven
+`td3-*` directories were root-owned mode `0700`; all six current `vbd-*`
+records were root-owned regular files, mode `0600`, with one link. All six
+also passed the patch's size and version checks. This validates the policy
+against those actual files; the patched library was not deployed for this check.

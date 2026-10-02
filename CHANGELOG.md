@@ -3,6 +3,38 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
+## [Unreleased]
+
+### Security
+
+- Harden both libxenstat tapdisk readers against symlinks, unsafe ownership
+  and permissions, hard links, special files, invalid PIDs and malformed records.
+  The bundled patches must be applied to protect libxenstat itself.
+
+### Fixed
+
+- Keep the terminal responsive while Xen collection is blocked. Preserve
+  initialization errors, exit cleanly on failure, and mark stale samples.
+- Establish initial rates with two quick samples; slow samples no longer
+  skip the next collection deadline. Sleep longer when collection is idle.
+- Reset VM and disk baselines on identity changes or counter resets, and
+  discard disk intervals spanning failed reads. Preserve known VM UUIDs
+  across transient xenstore read failures without requiring XAPI.
+- Preserve partial disk sums in host, VM and SR graphs. New disks wait for
+  a baseline without marking coverage degraded; missing measurements show
+  gaps rather than zero. Highlight disk collection failures separately
+  from disk-reported I/O errors.
+- Keep physical CPU history attached to its CPU ID across hotplug; newly
+  observed or reset counters remain unknown until a valid interval exists.
+
+### Changed
+
+- JSON consumers: `host.pcpu_busy` entries can now be `null`, and source
+  availability has a new `partial` value. Coverage objects report `available`,
+  `total` and `pending`; `disk_samples` and `pcpu_samples` describe valid
+  intervals. Disk rates expose `stats_valid`, `collection_error` and
+  `warming_up`; domain rates expose `baseline_reset`.
+
 ## [0.4.1] - 2026-10-02
 
 ### Fixed
