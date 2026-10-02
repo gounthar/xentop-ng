@@ -295,6 +295,10 @@ impl DomRates {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct VbdRates {
+    /// Two successful, monotonic counter samples from this device.
+    pub stats_valid: bool,
+    /// Collection failure, distinct from a disk-reported I/O error.
+    pub collection_error: bool,
     pub dev: u32,
     pub name: String,
     pub kind: Option<VbdKind>,
@@ -465,6 +469,17 @@ pub fn vbd_name(dev: u32) -> String {
     format!("xvd{}", letters(index))
 }
 
+/// Never derive rates from failed reads or across counter resets.
+fn valid_vbd_pair(prev: &VbdRaw, cur: &VbdRaw) -> bool {
+    !prev.error
+        && !cur.error
+        && cur.rd_reqs >= prev.rd_reqs
+        && cur.wr_reqs >= prev.wr_reqs
+        && cur.rd_sects >= prev.rd_sects
+        && cur.wr_sects >= prev.wr_sects
+        && cur.oo_reqs >= prev.oo_reqs
+}
+
 pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
     let dt = cur.at.duration_since(prev.at).as_secs_f64().max(1e-3);
     let dt_ns = dt * 1e9;
@@ -558,11 +573,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                 dev: v.dev,
                 name: vbd_name(v.dev),
                 kind: Some(v.kind),
-                errors: v
-                    .ext
-                    .map(|e| e.io_errors)
-                    .unwrap_or(0)
-                    .saturating_add(v.error as u64),
+                errors: v.ext.map(|e| e.io_errors).unwrap_or(0),
+                collection_error: v.error,
                 backing: v.backing.clone().unwrap_or_default(),
                 ..Default::default()
             };
@@ -571,21 +583,28 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             // No in-flight estimate: tapdisk counts empty flushes as
             // submitted writes but never as completed ones, so
             // submitted - completed drifts upward forever.
-            if let Some(pv) = pv {
+            if let Some(pv) = pv.filter(|pv| valid_vbd_pair(pv, v)) {
+                vr.stats_valid = true;
                 vr.rd_bps = d(v.rd_sects, pv.rd_sects) as f64 * 512.0 / dt;
                 vr.wr_bps = d(v.wr_sects, pv.wr_sects) as f64 * 512.0 / dt;
                 vr.rd_iops = d(v.rd_reqs, pv.rd_reqs) as f64 / dt;
                 vr.wr_iops = d(v.wr_reqs, pv.wr_reqs) as f64 / dt;
                 vr.oo_ps = d(v.oo_reqs, pv.oo_reqs) as f64 / dt;
                 if let (Some(e), Some(pe)) = (v.ext, pv.ext) {
-                    (ru, wu) = (d(e.rd_usecs, pe.rd_usecs), d(e.wr_usecs, pe.wr_usecs));
-                    (rn, wn) = (d(e.rd_done, pe.rd_done), d(e.wr_done, pe.wr_done));
-                    vr.rd_lat_us = lat(ru, rn);
-                    vr.wr_lat_us = lat(wu, wn);
-                    rd_us = rd_us.saturating_add(ru);
-                    wr_us = wr_us.saturating_add(wu);
-                    rd_done = rd_done.saturating_add(rn);
-                    wr_done = wr_done.saturating_add(wn);
+                    if e.rd_done >= pe.rd_done
+                        && e.wr_done >= pe.wr_done
+                        && e.rd_usecs >= pe.rd_usecs
+                        && e.wr_usecs >= pe.wr_usecs
+                    {
+                        (ru, wu) = (d(e.rd_usecs, pe.rd_usecs), d(e.wr_usecs, pe.wr_usecs));
+                        (rn, wn) = (d(e.rd_done, pe.rd_done), d(e.wr_done, pe.wr_done));
+                        vr.rd_lat_us = lat(ru, rn);
+                        vr.wr_lat_us = lat(wu, wn);
+                        rd_us = rd_us.saturating_add(ru);
+                        wr_us = wr_us.saturating_add(wu);
+                        rd_done = rd_done.saturating_add(rn);
+                        wr_done = wr_done.saturating_add(wn);
+                    }
                 }
             }
             r.disk_rd_bps += vr.rd_bps;
@@ -764,6 +783,25 @@ mod rate_tests {
         let d = &r.domains[0];
         assert_eq!(d.cpu_pct, 0.0);
         assert_eq!(d.disk_rd_iops, 0.0);
+    }
+
+    #[test]
+    fn failed_disk_read_requires_a_new_baseline() {
+        let t = Instant::now();
+        let good = snap(t, vec![dom(5, "vm", 0, 1_000_000)]);
+        let mut failed = snap(t + Duration::from_secs(1), vec![dom(5, "vm", 0, 0)]);
+        failed.domains[0].vbds[0].error = true;
+        let recovered = snap(t + Duration::from_secs(2), vec![dom(5, "vm", 0, 1_000_010)]);
+        let next = snap(t + Duration::from_secs(3), vec![dom(5, "vm", 0, 1_000_020)]);
+        for (a, b) in [(&good, &failed), (&failed, &recovered)] {
+            let r = compute(a, b);
+            assert!(!r.domains[0].vbds[0].stats_valid);
+            assert_eq!(r.host.disk_rd_iops, 0.0);
+            assert_eq!(r.domains[0].disk_errors, 0);
+        }
+        let r = compute(&recovered, &next);
+        assert!(r.domains[0].vbds[0].stats_valid);
+        assert_eq!(r.host.disk_rd_iops, 10.0);
     }
 
     #[test]

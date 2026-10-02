@@ -232,9 +232,30 @@ pub(super) fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
                 }
                 SrCol::Kind => sp.push(Span::styled(fmt::pad(&v.name, w, false), Style::new().fg(th.fg))),
                 SrCol::Vbds => sp.push(Span::raw(" ".repeat(w))),
-                SrCol::Iops => sp.push(num(fmt::count(v.rd_iops + v.wr_iops), th.fg)),
-                SrCol::Read => sp.push(num(fmt::rate(v.rd_bps), th.rd.at(1.0))),
-                SrCol::Write => sp.push(num(fmt::rate(v.wr_bps), th.wr.at(1.0))),
+                SrCol::Iops => sp.push(num(
+                    if v.stats_valid {
+                        fmt::count(v.rd_iops + v.wr_iops)
+                    } else {
+                        "-".into()
+                    },
+                    th.fg,
+                )),
+                SrCol::Read => sp.push(num(
+                    if v.stats_valid {
+                        fmt::rate(v.rd_bps)
+                    } else {
+                        "-".into()
+                    },
+                    th.rd.at(1.0),
+                )),
+                SrCol::Write => sp.push(num(
+                    if v.stats_valid {
+                        fmt::rate(v.wr_bps)
+                    } else {
+                        "-".into()
+                    },
+                    th.wr.at(1.0),
+                )),
                 SrCol::RLat => sp.push(num(fmt::lat(v.rd_lat_us), lat_color(th, v.rd_lat_us))),
                 SrCol::WLat => sp.push(num(fmt::lat(v.wr_lat_us), lat_color(th, v.wr_lat_us))),
                 SrCol::Trend => sp.extend(io_trend(th, hist.vbds.get(&(d.id, v.dev)), w)),
