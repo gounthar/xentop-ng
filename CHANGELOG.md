@@ -18,6 +18,8 @@ release binaries are on the [releases page](https://github.com/olivierlambert/xe
     the spare width. Long names never push other columns out;
   - SR names in the SR view (`v`) use the width left over past 20
     columns.
+  - these widths grow at once but shrink only after 30 s, so short-lived
+    VMs (CI jobs, backups) don't shift the columns as they come and go.
 
 ## [0.3.1] - 2026-10-01
 

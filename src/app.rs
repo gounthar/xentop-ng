@@ -98,6 +98,8 @@ pub struct App {
     /// Area of the open popup, if any: clicks outside it close it.
     pub popup_area: Rect,
     last_click: Option<(Instant, u32)>,
+    /// Name column widths, held across frames.
+    pub name_w: crate::ui::NameWidths,
 }
 
 impl App {
@@ -144,6 +146,7 @@ impl App {
             cols_dropped: Vec::new(),
             popup_area: Rect::default(),
             last_click: None,
+            name_w: Default::default(),
         }
     }
 
