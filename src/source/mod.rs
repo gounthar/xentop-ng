@@ -1,4 +1,5 @@
 pub mod demo;
+mod dl;
 pub mod fallback;
 pub mod xapi;
 pub mod xenstat;
