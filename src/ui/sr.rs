@@ -105,7 +105,13 @@ pub(super) fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         return;
     }
     if srs.is_empty() {
-        let msg = "no storage mapping (xenstore); see i   v: graphs";
+        // No rows: either no VM disk is active (and no xapi to list the
+        // host's SRs anyway), or the disks can't be mapped to storage.
+        let msg = if app.status.storage == crate::source::Avail::Missing {
+            "no storage mapping (xenstore); see i   v: graphs"
+        } else {
+            "no VM disks active on this host   v: graphs"
+        };
         put(buf, area.x, area.y, area.width, &Line::from(dim(th, msg)));
         return;
     }
