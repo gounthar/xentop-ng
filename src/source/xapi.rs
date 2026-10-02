@@ -877,6 +877,12 @@ mod tests {
             s.domains[0].nets[0].network.as_deref(),
             Some("Pool-wide network associated with eth0")
         );
+        // The worker publishes names before it marks itself connected:
+        // under emulation (qemu) the state can lag the names a little.
+        let t = Instant::now();
+        while x.state() == XapiState::Connecting && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(x.state(), XapiState::Connected);
         // Nothing new wanted: no more calls on later samples.
         let n = calls.lock().unwrap().len();
