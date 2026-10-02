@@ -138,12 +138,14 @@ impl Collector {
             }
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
+                // The worker only exits on its own by panicking (release
+                // builds abort instead). A sampling error is context, not
+                // the cause.
                 self.stopped = true;
-                Some(Update::Fatal(
-                    self.last_error
-                        .take()
-                        .unwrap_or_else(|| "collector stopped".into()),
-                ))
+                Some(Update::Fatal(match self.last_error.take() {
+                    Some(e) => format!("collector stopped unexpectedly (last sample error: {e})"),
+                    None => "collector stopped unexpectedly".into(),
+                }))
             }
         }
     }
@@ -235,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_preserves_last_sampling_error() {
+    fn disconnect_reports_termination_with_last_error_as_context() {
         let (requests, _rx) = mpsc::sync_channel(1);
         let (tx, updates) = mpsc::sync_channel(1);
         let (_startup_tx, startup) = mpsc::sync_channel(1);
@@ -253,7 +255,9 @@ mod tests {
             .unwrap();
         drop(tx);
         assert!(matches!(c.poll(), Some(Update::Sample(Err(_)))));
-        assert!(matches!(c.poll(), Some(Update::Fatal(e)) if e == "specific read error"));
+        assert!(
+            matches!(c.poll(), Some(Update::Fatal(e)) if e == "collector stopped unexpectedly (last sample error: specific read error)")
+        );
         assert!(c.poll().is_none());
     }
 }
