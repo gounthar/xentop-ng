@@ -3,14 +3,15 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-02
 
 ### Added
 
 - Downloads for arm64 (`aarch64-linux-gnu`, glibc 2.17 or newer) and
   RISC-V (`riscv64-linux-gnu`, glibc 2.27 or newer) dom0s. They are
   cross-built, and each release runs the test suite and the demo under
-  qemu-user; they haven't been tried on a real Arm or RISC-V Xen host yet.
+  qemu-user; they haven't been tried on a real Arm or RISC-V Xen host yet:
+  reports are welcome, see [Architectures](https://github.com/olivierlambert/xentop-ng/blob/v0.4.0/README.md#architectures).
 
 ## [0.3.2] - 2026-10-02
 
@@ -109,6 +110,7 @@ First public release: same as 0.1.0, with build provenance attestations.
 Initial release: a btop-style Xen monitor with fallbacks for what stock
 libxenstat lacks, security hardening, CI and signed release builds.
 
+[0.4.0]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/olivierlambert/xentop-ng/compare/v0.2.2...v0.3.0
