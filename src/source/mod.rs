@@ -2,6 +2,7 @@ pub mod demo;
 mod dl;
 pub mod fallback;
 mod gaps;
+pub mod worker;
 pub mod xapi;
 pub mod xenstat;
 pub mod xenstore;

@@ -1,7 +1,8 @@
 use crate::config::{self, ColorMode, Prefs};
 use crate::history::History;
 use crate::model::{self, DomRates, Rates, Snapshot};
-use crate::source::{DataStatus, Source};
+use crate::source::worker::{Collector, Update};
+use crate::source::DataStatus;
 use crate::theme::{Theme, MONO, THEMES};
 use crate::ui::columns::{self, Column};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -65,7 +66,9 @@ pub struct FrameState {
 }
 
 pub struct App {
-    pub source: Box<dyn Source>,
+    pub collector: Collector,
+    pub last_sample: Option<Instant>,
+    started: Instant,
     pub source_desc: String,
     prev: Option<Snapshot>,
     pub rates: Option<Rates>,
@@ -111,10 +114,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(source: Box<dyn Source>, interval: Duration, theme: usize) -> Self {
-        let source_desc = source.describe();
+    pub fn new(collector: Collector, interval: Duration, theme: usize) -> Self {
+        let source_desc = "connecting".into();
         App {
-            source,
+            collector,
+            last_sample: None,
+            started: Instant::now(),
             source_desc,
             prev: None,
             rates: None,
@@ -231,27 +236,46 @@ impl App {
         Some(config::save(&cfg.path, &out).map(|_| cfg.path.clone()))
     }
 
-    /// Take a sample if due. Returns true when the view changed.
+    /// Poll without waiting; at most one collection can be in flight.
     pub fn tick(&mut self) -> bool {
-        if Instant::now() < self.next_sample {
-            return false;
-        }
-        self.next_sample = Instant::now() + self.interval;
-        if self.paused {
-            return false;
-        }
-        match self.source.sample() {
-            Ok(snap) => {
-                self.ingest(snap);
-                self.status = self.source.status();
-                self.error = None;
+        let mut changed = false;
+        if let Some(update) = self.collector.poll() {
+            changed = true;
+            match update {
+                Update::Ready {
+                    history,
+                    status,
+                    description,
+                } => {
+                    self.source_desc = description;
+                    self.status = status;
+                    for snap in history {
+                        self.ingest(snap);
+                    }
+                }
+                Update::Sample(Ok((snap, status))) => {
+                    if !self.paused {
+                        self.ingest(snap);
+                    }
+                    self.status = status;
+                    self.error = None;
+                }
+                Update::Sample(Err(e)) => self.error = Some(e),
             }
-            Err(e) => self.error = Some(e.to_string()),
         }
-        true
+        if !self.paused && Instant::now() >= self.next_sample {
+            self.collector.request();
+            self.next_sample = Instant::now() + self.interval;
+        }
+        changed
+    }
+
+    pub fn sample_age(&self) -> Duration {
+        self.last_sample.unwrap_or(self.started).elapsed()
     }
 
     pub fn ingest(&mut self, snap: Snapshot) {
+        self.last_sample = Some(snap.at);
         if let Some(prev) = &self.prev {
             let r = model::compute(prev, &snap);
             self.hist.record(&r);
@@ -680,9 +704,14 @@ mod tests {
     }
 
     fn demo_app() -> App {
+        use crate::source::Source;
         let mut src = DemoSource::new(&DemoConfig::default());
         let hist = src.warmup(5);
-        let mut a = App::new(Box::new(src), Duration::from_secs(1), 0);
+        let mut a = App::new(
+            Collector::spawn(move || Ok(Box::new(src)), 0),
+            Duration::from_secs(1),
+            0,
+        );
         for s in hist {
             a.ingest(s);
         }

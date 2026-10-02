@@ -241,9 +241,13 @@ fn startup_prefs(o: &Opts) -> (Prefs, Option<app::ConfigState>, Vec<String>) {
     (start, state, warnings)
 }
 
-fn run_ui(src: Box<dyn Source>, o: &Opts) -> Result<()> {
+fn run_ui(open: impl FnOnce() -> Result<Box<dyn Source>> + Send + 'static, o: &Opts) -> Result<()> {
     let (prefs, cfg, warnings) = startup_prefs(o);
-    let mut app = App::new(src, prefs.interval, prefs.theme);
+    let mut app = App::new(
+        source::worker::Collector::spawn(open, 600),
+        prefs.interval,
+        prefs.theme,
+    );
     let term = std::env::var("TERM").ok();
     // no-color.org: set and not empty.
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
@@ -260,38 +264,26 @@ fn run_ui(src: Box<dyn Source>, o: &Opts) -> Result<()> {
         }
     }
     app.config = cfg;
-    let history = app.source.warmup(600);
-    if history.is_empty() {
-        // Two quick samples so the first frame already has rates.
-        app.tick();
-        std::thread::sleep(Duration::from_millis(250));
-        app.next_sample = Instant::now();
-        app.tick();
-    } else {
-        for snap in history {
-            app.ingest(snap);
-        }
-        app.status = app.source.status();
-        app.next_sample = Instant::now() + app.interval;
-    }
-
     let (mut term, guard) = term::Guard::enter()?;
     let res = (|| -> Result<()> {
+        let mut redraw = true;
+        let mut last_draw = Instant::now();
         while !app.quit {
-            term.draw(|f| ui::draw(f, &mut app))?;
-            // Wake at the next sample, or once a second for the clock.
-            let wait = app
-                .next_sample
-                .saturating_duration_since(Instant::now())
-                .min(Duration::from_millis(1000));
+            redraw |= app.tick();
+            if redraw || last_draw.elapsed() >= Duration::from_secs(1) {
+                term.draw(|f| ui::draw(f, &mut app))?;
+                last_draw = Instant::now();
+                redraw = false;
+            }
+            // Poll worker results regularly, including during input bursts.
+            let wait = Duration::from_millis(50);
             if event::poll(wait)? {
+                redraw = true;
                 match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => app.on_key(k),
                     Event::Mouse(m) => app.on_mouse(m),
                     _ => {}
                 }
-            } else {
-                app.tick();
             }
         }
         Ok(())
@@ -314,18 +306,24 @@ fn main() -> Result<()> {
         o.delay = x.ui_delay().or(o.delay);
         o.dom0_first = x.dom0_first;
     }
-    let src: Box<dyn Source> = if o.demo {
-        Box::new(DemoSource::new(&o.demo_cfg))
-    } else {
-        // xentop's batch output has no names, so it doesn't need xapi.
-        let names = !o.no_xapi && !xentop.as_ref().is_some_and(|x| x.batch);
-        Box::new(XenstatSource::open(o.lib.as_deref())?.with_xapi(names))
+    // Only configuration crosses the thread boundary; FFI handles are
+    // constructed and used by the collector thread itself.
+    let demo = o.demo;
+    let demo_cfg = o.demo_cfg.clone();
+    let lib = o.lib.clone();
+    let names = !o.no_xapi && !xentop.as_ref().is_some_and(|x| x.batch);
+    let open = move || -> Result<Box<dyn Source>> {
+        if demo {
+            Ok(Box::new(DemoSource::new(&demo_cfg)))
+        } else {
+            Ok(Box::new(XenstatSource::open(lib.as_deref())?.with_xapi(names)))
+        }
     };
     if let Some(x) = xentop.filter(|x| x.batch) {
-        xentop_compat::batch(src, &x)
+        xentop_compat::batch(open()?, &x)
     } else if o.batch {
-        batch(src, &o)
+        batch(open()?, &o)
     } else {
-        run_ui(src, &o)
+        run_ui(open, &o)
     }
 }

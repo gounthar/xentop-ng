@@ -64,6 +64,12 @@ pub(super) fn header(buf: &mut Buffer, app: &App, area: Rect) {
             Style::new().fg(th.bad),
         ));
     }
+    if !app.paused && app.sample_age() > (app.interval * 2).max(std::time::Duration::from_secs(2)) {
+        right.push(Span::styled(
+            format!(" stale {:.0}s ", app.sample_age().as_secs_f64()),
+            Style::new().fg(th.warn),
+        ));
+    }
     if app.paused {
         right.push(Span::styled(" ⏸ paused ", Style::new().fg(th.bg).bg(th.warn)));
         right.push(Span::raw(" "));

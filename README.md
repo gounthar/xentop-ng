@@ -512,3 +512,10 @@ domid/name and counter rollback provide a conservative fallback. A restart
 entirely between samples whose identity and counters appear continuous cannot
 be identified reliably. Disk backing changes and failed reads also require a
 fresh baseline; collection errors are separate from disk-reported I/O errors.
+
+Interactive collection runs on a dedicated thread, including opening Xen
+libraries and xenstore. Only one sample can be in flight; input remains
+responsive and the header marks stale data. Quitting does not wait for a
+blocked collector. This isolates blocking calls, not C crashes: a separate
+collector process and privilege separation remain future work. Batch modes
+retain their synchronous sampling and output behavior.
