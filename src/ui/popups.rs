@@ -114,7 +114,7 @@ pub(super) fn help_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
         _ => " ▲ more · ↑↓ scroll · other keys close ",
     };
     let (outer, inner) = popup_frame(buf, th, area, " help ", width as u16, rows as u16 + 4, footer);
-    app.popup_area = outer;
+    app.frame.popup_area = outer;
     let body = Rect::new(
         inner.x + 1,
         inner.y + 1,
@@ -198,9 +198,9 @@ pub(super) fn chooser_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
     let n = app.columns.len();
     let cursor = app.chooser.unwrap_or(0).min(n.saturating_sub(1));
     let (outer, inner) = popup_frame(buf, th, area, " columns ", 76, n as u16 + 4, " esc close ");
-    app.popup_area = outer;
+    app.frame.popup_area = outer;
     if inner.width < 10 || inner.height < 2 {
-        app.chooser_hits = Default::default();
+        app.frame.chooser_hits = Default::default();
         return;
     }
     let x = inner.x + 1;
@@ -228,7 +228,7 @@ pub(super) fn chooser_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
     let scroll = if vis == 0 {
         0
     } else {
-        let s = app.chooser_hits.scroll.min(cursor);
+        let s = app.frame.chooser_hits.scroll.min(cursor);
         if cursor >= s + vis {
             cursor + 1 - vis
         } else {
@@ -237,7 +237,7 @@ pub(super) fn chooser_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
     };
     // "▸ [x] ▲▼ TITLE..."
     let up_x = x + 6;
-    app.chooser_hits = crate::app::ChooserHits {
+    app.frame.chooser_hits = crate::app::ChooserHits {
         rows,
         scroll,
         up_x,
@@ -267,7 +267,7 @@ pub(super) fn chooser_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
         ];
         if c.locked {
             sp.push(dim(th, "  (always)"));
-        } else if app.cols_dropped.contains(&c.id) {
+        } else if app.frame.cols_dropped.contains(&c.id) {
             sp.push(Span::styled("  (no room)", Style::new().fg(th.warn)));
         }
         put(buf, x, y, w, &Line::from(sp));
@@ -363,7 +363,7 @@ pub(super) fn info_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
         Line::from(dim(th, "(libxenstat/) provide all of it natively; steal")),
         Line::from(dim(th, "time per vCPU also needs their hypervisor patch.")),
     ];
-    app.popup_area = popup(buf, th, area, " data sources ", 70, lines);
+    app.frame.popup_area = popup(buf, th, area, " data sources ", 70, lines);
 }
 
 #[cfg(test)]

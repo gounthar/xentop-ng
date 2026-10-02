@@ -153,6 +153,7 @@ pub(super) fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         // order every second.
         let room = w.saturating_sub(4 + 1 + 6 + 2);
         let longest = app
+            .frame
             .name_w
             .cpu
             .hold(longest_name(r.domains.iter()), Instant::now());
