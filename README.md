@@ -26,6 +26,14 @@ per disk and per network interface.
 - **Network and disk**: throughput graphs for traffic to/from VMs and for
   reads/writes, with IOPS and peaks.
 - **Disk latency**: read/write service time from tapdisk3, with history.
+- **Numbers you can trust**: a VM reboot, a disk swap or a counter reset
+  starts that figure afresh instead of producing a bogus spike. Totals
+  missing some devices are marked `*`, unknown values show `-`, and gaps in
+  history are dotted rather than drawn as idle
+  ([details](#when-vms-and-disks-change)).
+- **Stays responsive**: sampling runs on its own thread, so a hung
+  hypervisor or xenstore call never freezes the keyboard; the header says
+  how stale the data is.
 - **Steal time**: how long vCPUs were ready to run but waited for a pCPU,
   the most direct sign of an overcommitted host. Per domain on stock XCP-ng;
   per vCPU [with a hypervisor patch](#steal-time-needs-a-hypervisor-patch).
@@ -204,8 +212,9 @@ per-domain figure on XCP-ng.
   vCPU that reports it.
 
 The data sources panel (`i`) and `--batch` (`"sources"`) say where the
-figure comes from. Steal isn't counted in the header's ◐ marker, since it
-depends on the hypervisor rather than on libxenstat.
+figure comes from. Missing steal time doesn't raise the header's ◐ marker,
+since it depends on the hypervisor rather than on libxenstat; steal
+available for only some domains does.
 
 ### Building for XCP-ng 8.3 yourself
 
@@ -262,7 +271,9 @@ wrong, and the `"sources"` part of `xentop-ng --batch -n 1`.
   pass for the real one.
 - **Fallback files:** stats files in world-writable `/dev/shm` are only
   trusted if they and their directory are root-owned, opened without
-  following symlinks, and belong to a live tapdisk.
+  following symlinks, and belong to a live tapdisk. Stock libxenstat reads
+  the same files with a plain `fopen()`; [patch 0005](libxenstat/README.md#0005-safe-tapdisk-stats-reads)
+  gives it the same checks, so apply it if you replace libxenstat.
 - **xapi names** (SRs, VDIs, networks) are bounded and sanitised like
   VM names. Only read-only API calls are made.
 - **xenstore values** (backing paths, VM paths) are length-bounded and
@@ -276,47 +287,42 @@ wrong, and the `"sources"` part of `xentop-ng --batch -n 1`.
 
 Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
-### Counter identity and recovery
+### When VMs and disks change
 
-VM identity is read from xenstore on each sample; XAPI is not required.
-Renames preserve history when a UUID is available. A transient UUID read failure
-keeps the last known identity while the name and CPU counters remain consistent.
-A different known UUID or CPU counter rollback starts a new baseline. Without
-a UUID, domid/name and counter rollback provide a conservative fallback. A restart
-entirely between samples whose identity and counters appear continuous cannot
-be identified reliably. Disk backing changes and failed reads also require a
-fresh baseline; collection errors are separate from disk-reported I/O errors.
+Rates are the difference between two samples, so xentop-ng first checks
+that both samples measure the same thing:
 
-Interactive collection runs on a dedicated thread, including opening Xen
-libraries and xenstore. Only one sample can be in flight; input remains
-responsive and the header marks stale data. Quitting does not wait for a
-blocked collector. Startup errors exit cleanly; initialization gets a 250 ms grace
-period before the cancellable UI opens. A second sample is requested after
-250 ms (or the configured interval, if shorter) to establish rates quickly.
-The event loop polls while collection is outstanding and sleeps up to one
-second when idle. This isolates blocking calls, not C crashes: a separate
-collector process and privilege separation remain future work. Batch modes
-retain their synchronous sampling and output behavior.
+- **VMs** are recognised by their UUID, read from xenstore (xapi isn't
+  needed). A renamed VM keeps its history. A rebooted VM gets a new domain
+  ID and starts afresh, and so does a domain ID that Xen reuses for another
+  VM, or a VM whose CPU counter goes backwards. A brief xenstore read
+  failure keeps the last known UUID. With no UUID at all, the domain ID and
+  name are used.
+- **Disks** start afresh when their backing changes (another VDI in the
+  same slot), their counters go backwards, or a read fails. A new or
+  hot-plugged disk shows `-` until it has two samples. While a booting
+  guest's PV driver hasn't connected yet, its disks are waiting, not
+  failing, so a VM boot doesn't raise the ◐ marker.
+- **Physical CPUs** are tracked by ID, so CPU hotplug can't hand one core's
+  history to another. A core that comes online shows `-` until it has a
+  baseline.
+- **Partial data:** when only some disks or pCPUs have a valid interval,
+  totals add up the valid ones and are marked `*`, and the header shows ◐;
+  when none do, they show `-`. Graphs leave a dotted gap for missing
+  samples instead of drawing them as zero. A disk that can't be read shows
+  `read!` in the domain details, apart from the I/O errors the disk itself
+  reports.
 
-Measurement coverage is included in JSON: `disk_samples` counts valid disk
-intervals at host/domain/SR level. Its `pending` count tracks healthy new disks
-waiting for a baseline, and disks whose backend has not connected yet (a
-booting guest), excluded from `total` and from degraded coverage.
-`sources.vbd_latency_coverage` and `sources.steal_coverage` count available
-counters. `partial` is a source status.
-Disk rates are sums over valid devices; the UI marks partial sums with `*`
-and shows `-` when disks exist but none has a valid interval. Host, VM and SR
-disk graphs retain partial sums when at least one disk has a valid interval.
-Missing history is marked with a dot, distinct from an idle zero. The data-sources
-panel shows latency and steal coverage. A readable VIF inventory containing no interfaces
-is not applicable; an unreadable inventory is missing, not a successful read.
+One case can't be detected: a VM that restarts entirely between two
+samples and comes back with the same domain ID, name and UUID, and counters
+higher than before.
 
-pCPU utilization needs two monotonic counters for the same physical CPU ID.
-Newly online CPUs and reset counters show `-` until a baseline exists; JSON
-`host.pcpu_busy` entries are nullable and `host.pcpu_samples` reports coverage.
-The host average excludes unknown CPUs (and is marked partial); when none
-have valid intervals it uses the existing domain-based estimate. CPU history
-is keyed by physical ID, so hotplug cannot transfer history between cores.
+Sampling runs on its own thread, including loading the Xen libraries, and
+only one sample is in flight at a time. If a hypervisor or xenstore call
+hangs, the keyboard still works, the header shows ` stale Ns`, and `q`
+quits without waiting. If xentop-ng can't start (no Xen, missing library),
+it prints why and exits before taking over the terminal. Batch modes sample
+in line, as before.
 
 ## Keys
 
@@ -429,6 +435,19 @@ latency, per VBD and per VIF. This is handy next to a benchmark run.
 panel). Domains carry `vm_uuid` and `mem_target`
 (bytes), VBDs `sr`, `vdi`, `sr_kind` and `path`, and `srs` holds the per-SR
 totals (full UUIDs, latency, top VM by IOPS). Unknown values are `null`.
+
+Some fields say how complete each figure is
+(see [When VMs and disks change](#when-vms-and-disks-change)):
+
+- `sources`: each class of data is `lib`, `fallback`, `partial`, `missing`
+  or `not_applicable`; `vbd_latency_coverage` and `steal_coverage` count
+  the disks and domains that report it.
+- `disk_samples` (host, domain, SR) and `host.pcpu_samples`: `available`
+  devices with a valid interval out of `total`; `pending` counts new disks
+  and disks still connecting, which aren't expected to have one yet.
+- Per VBD, `stats_valid`, `warming_up` and `collection_error` say why a
+  rate is missing; per domain, `baseline_reset` marks a fresh start.
+- `host.pcpu_busy` entries are `null` for a core without a baseline.
 
 For xentop's text format instead, see
 [Drop-in replacement for xentop](#drop-in-replacement-for-xentop).
