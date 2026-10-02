@@ -47,9 +47,13 @@ pub fn already_loaded<S: AsRef<str>>(names: &[S]) -> Option<Library> {
 /// someone through sudo, that must not become "run any .so as root": as
 /// root, only accept an absolute path to a root-owned file whose directories
 /// are all root-owned and not group/world-writable.
-pub fn check_explicit_path(p: &str) -> Result<()> {
+///
+/// Returns the path to load: as root, the resolved path that was checked,
+/// not `p`, which may go through a symlink its owner could swap between
+/// the check and the load.
+pub fn checked_path(p: &str) -> Result<String> {
     if unsafe { libc::geteuid() } != 0 {
-        return Ok(());
+        return Ok(p.to_string());
     }
     let path = Path::new(p);
     if !path.is_absolute() {
@@ -63,7 +67,9 @@ pub fn check_explicit_path(p: &str) -> Result<()> {
             a.display()
         );
     }
-    Ok(())
+    real.into_os_string()
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("--lib {p}: not a UTF-8 path"))
 }
 
 /// The first of `real` and its parent directories not owned by `owner`, or
