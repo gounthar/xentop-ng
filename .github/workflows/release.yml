@@ -40,6 +40,13 @@ jobs:
           CONTAINER_ENGINE: docker
         run: build/build-xentop-ng.sh
 
+      # arm64 and riscv64, cross-built with zig against old glibcs; the
+      # script runs the test suite and the demo under qemu-user.
+      - name: Build xentop-ng for arm64 and riscv64
+        env:
+          CONTAINER_ENGINE: docker
+        run: build/build-cross.sh
+
       - name: Smoke test
         run: |
           build/out/xentop-ng --version
@@ -109,6 +116,10 @@ jobs:
           - **xentop-ng-$TAG-x86_64-linux-gnu.tar.gz**: the binary alone, for
             any x86_64 Linux dom0 with glibc 2.17 or newer. It uses the system
             libxenstat and fills gaps with built-in fallbacks.
+          - **xentop-ng-$TAG-aarch64-linux-gnu.tar.gz** and
+            **xentop-ng-$TAG-riscv64-linux-gnu.tar.gz**: the same for arm64
+            (glibc 2.17 or newer) and riscv64 (glibc 2.27 or newer) dom0s.
+            Tested under qemu-user only so far; reports from real hosts welcome.
 
           Verify: \`sha256sum -c SHA256SUMS\` and
           \`gh attestation verify <file> --repo $REPO\`.
