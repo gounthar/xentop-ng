@@ -26,7 +26,7 @@ pub enum Paint<'a> {
 /// gets one dot so small spikes stay visible, while near-zero noise doesn't
 /// paint a dotted "baseline".
 fn dots_for(v: f64, max: f64, dots: usize) -> usize {
-    if v <= 0.0 || max <= 0.0 {
+    if !v.is_finite() || v <= 0.0 || max <= 0.0 {
         return 0;
     }
     let f = (v / max).min(1.0);
@@ -59,6 +59,12 @@ pub fn area_graph(buf: &mut Buffer, area: Rect, data: &[f64], max: f64, paint: P
     };
     for cx in 0..w {
         let (vl, vr) = (sample(cx * 2), sample(cx * 2 + 1));
+        if !vl.is_finite() && !vr.is_finite() {
+            if let Some(c) = buf.cell_mut((area.x + cx as u16, area.y + area.height - 1)) {
+                c.set_char('·');
+            }
+            continue;
+        }
         let (hl, hr) = (dots_for(vl, max, dots), dots_for(vr, max, dots));
         if hl == 0 && hr == 0 {
             continue;
@@ -168,4 +174,23 @@ pub fn meter(frac: f64, width: usize, grad: &Gradient, empty: Color) -> Vec<Span
 /// Write a line into the buffer at (x, y), clipped to `w` columns.
 pub fn put(buf: &mut Buffer, x: u16, y: u16, w: u16, line: &Line) {
     buf.set_line(x, y, line, w);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn missing_graph_samples_differ_from_idle() {
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        area_graph(
+            &mut buf,
+            area,
+            &[0.0, 0.0, f64::NAN, f64::NAN],
+            10.0,
+            Paint::Value(&|_| Color::White),
+        );
+        assert_eq!(buf[(0, 0)].symbol(), " ");
+        assert_eq!(buf[(1, 0)].symbol(), "·");
+    }
 }

@@ -519,3 +519,12 @@ responsive and the header marks stale data. Quitting does not wait for a
 blocked collector. This isolates blocking calls, not C crashes: a separate
 collector process and privilege separation remain future work. Batch modes
 retain their synchronous sampling and output behavior.
+
+Measurement coverage is included in JSON: `disk_samples` counts valid disk
+intervals at host/domain/SR level, and `sources.vbd_latency_coverage` and
+`sources.steal_coverage` count available counters. `partial` is a source status.
+Disk rates are sums over valid devices; the UI marks partial sums with `*`
+and shows `-` when no expected disk has a valid interval. Missing history is
+marked with a dot, distinct from an idle zero. The data-sources panel shows
+latency and steal coverage. A readable VIF inventory containing no interfaces
+is not applicable; an unreadable inventory is missing, not a successful read.

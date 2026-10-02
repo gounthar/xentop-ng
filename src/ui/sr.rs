@@ -166,8 +166,8 @@ pub(super) fn sr_table(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
                     let v = s.iops();
                     sp.push(num(fmt::count(v), if v < 0.5 { th.dim } else { th.fg }));
                 }
-                SrCol::Read => sp.push(num(fmt::rate(s.rd_bps), th.rd.at(1.0))),
-                SrCol::Write => sp.push(num(fmt::rate(s.wr_bps), th.wr.at(1.0))),
+                SrCol::Read => sp.push(num(s.disk_samples.label(fmt::rate(s.rd_bps)), th.rd.at(1.0))),
+                SrCol::Write => sp.push(num(s.disk_samples.label(fmt::rate(s.wr_bps)), th.wr.at(1.0))),
                 SrCol::RLat => sp.push(num(fmt::lat(s.rd_lat_us), lat_color(th, s.rd_lat_us))),
                 SrCol::WLat => sp.push(num(fmt::lat(s.wr_lat_us), lat_color(th, s.wr_lat_us))),
                 SrCol::Trend => sp.extend(io_trend(th, hist.srs.get(&s.sr), w)),
@@ -294,6 +294,10 @@ fn io_trend(th: &Theme, h: Option<&crate::history::IoHistory>, w: usize) -> Vec<
     let max = h.iops.iter().skip(skip).copied().fold(0.0, f64::max);
     let mut sp: Vec<Span<'static>> = (n..w).map(|_| empty()).collect();
     for (v, lat) in h.iops.iter().zip(&h.lat).skip(skip) {
+        if !v.is_finite() {
+            sp.push(dim(th, "·"));
+            continue;
+        }
         let l = if max >= 0.5 {
             (v / max * 8.0).round() as usize
         } else {

@@ -411,6 +411,8 @@ impl Source for XenstatSource {
         self.status.vifs = g.vifs;
         self.status.steal = g.steal;
         self.status.vbd_latency = g.vbd_latency;
+        self.status.vbd_latency_coverage = gaps::latency_coverage(&snap);
+        self.status.steal_coverage = gaps::steal_coverage(&snap);
         self.status.storage = self.storage.fill(&mut snap);
         if let Some(x) = &mut self.xapi {
             x.fill(&mut snap);

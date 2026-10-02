@@ -205,6 +205,7 @@ impl StorageMap {
         match (total, mapped) {
             (0, _) => Avail::NotApplicable,
             (_, 0) => Avail::Missing,
+            _ if mapped < total => Avail::Partial,
             _ => Avail::Fallback,
         }
     }

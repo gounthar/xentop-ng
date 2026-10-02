@@ -4,7 +4,8 @@
 //! host (see fallback.rs) sit behind [`Collectors`], so tests can fake them.
 
 use super::fallback::{self, Vbd3Index, XcCpuInfo, XcDomRunstate};
-use super::Avail;
+use super::{coverage_status, Avail};
+use crate::model::Coverage;
 use crate::model::{DomainRaw, NetRaw, Snapshot, VbdExt, VbdKind};
 use std::collections::HashMap;
 
@@ -23,7 +24,7 @@ pub trait Collectors {
     /// (cpu id, cumulative idle ns) for every online pCPU.
     fn pcpu_idle(&mut self) -> Option<Vec<(u32, u64)>>;
     /// VIF counters by (domid, devid).
-    fn vifs(&mut self) -> HashMap<(u32, u32), NetRaw>;
+    fn vifs(&mut self) -> Option<HashMap<(u32, u32), NetRaw>>;
     /// A domain's runnable time summed over its vCPUs (ns).
     fn dom_runnable_ns(&mut self, domid: u32, nr_vcpus: usize) -> Option<u64>;
     /// tapdisk3 counters by (domid, dev).
@@ -51,7 +52,7 @@ impl Collectors for HostCollectors {
     fn pcpu_idle(&mut self) -> Option<Vec<(u32, u64)>> {
         self.xc.as_mut().and_then(|xc| xc.idle())
     }
-    fn vifs(&mut self) -> HashMap<(u32, u32), NetRaw> {
+    fn vifs(&mut self) -> Option<HashMap<(u32, u32), NetRaw>> {
         fallback::proc_net_vifs()
     }
     fn dom_runnable_ns(&mut self, domid: u32, nr_vcpus: usize) -> Option<u64> {
@@ -92,7 +93,13 @@ fn vifs(snap: &mut Snapshot, c: &mut impl Collectors) -> Avail {
     if !snap.domains.iter().any(lacking) {
         return Avail::Lib;
     }
-    let vifs = c.vifs();
+    let Some(vifs) = c.vifs() else {
+        return if snap.domains.iter().any(|d| !d.nets.is_empty()) {
+            Avail::Partial
+        } else {
+            Avail::Missing
+        };
+    };
     let mut status = Avail::Lib;
     for d in snap.domains.iter_mut().filter(|d| lacking(d)) {
         let mut nets: Vec<NetRaw> = vifs
@@ -106,25 +113,52 @@ fn vifs(snap: &mut Snapshot, c: &mut impl Collectors) -> Avail {
             status = Avail::Fallback;
         }
     }
-    status
+    if snap.domains.iter().all(|d| d.nets.is_empty()) {
+        Avail::NotApplicable
+    } else {
+        status
+    }
 }
 
 /// Per vCPU from libxenstat (needs the hypervisor patch too), else per
 /// domain from XCP-ng's own domctl.
 fn steal(snap: &mut Snapshot, c: &mut impl Collectors) -> Avail {
-    let per_vcpu = |d: &DomainRaw| !d.vcpus.is_empty() && d.vcpus.iter().all(|v| v.runnable_ns.is_some());
-    if snap.domains.iter().any(per_vcpu) {
-        return Avail::Lib;
-    }
-    let mut found = false;
+    let mut fallback = false;
     for d in &mut snap.domains {
-        d.runnable_ns = c.dom_runnable_ns(d.id, d.vcpus.len());
-        found |= d.runnable_ns.is_some();
+        if !has_vcpu_steal(d) {
+            d.runnable_ns = c.dom_runnable_ns(d.id, d.vcpus.len());
+            fallback |= d.runnable_ns.is_some();
+        }
     }
-    if found {
-        Avail::Fallback
-    } else {
-        Avail::Missing
+    coverage_status(
+        steal_coverage(snap),
+        if fallback { Avail::Fallback } else { Avail::Lib },
+    )
+}
+
+fn has_vcpu_steal(d: &DomainRaw) -> bool {
+    !d.vcpus.is_empty() && d.vcpus.iter().all(|v| v.runnable_ns.is_some())
+}
+pub fn steal_coverage(snap: &Snapshot) -> Coverage {
+    Coverage {
+        total: snap.domains.len(),
+        available: snap
+            .domains
+            .iter()
+            .filter(|d| has_vcpu_steal(d) || d.runnable_ns.is_some())
+            .count(),
+    }
+}
+pub fn latency_coverage(snap: &Snapshot) -> Coverage {
+    let disks: Vec<_> = snap
+        .domains
+        .iter()
+        .flat_map(|d| &d.vbds)
+        .filter(|v| v.kind == VbdKind::Vbd3)
+        .collect();
+    Coverage {
+        total: disks.len(),
+        available: disks.iter().filter(|v| v.ext.is_some() && !v.error).count(),
     }
 }
 
@@ -134,27 +168,17 @@ fn vbd_latency(snap: &mut Snapshot, lib_vbd_ext: bool, c: &mut impl Collectors) 
         return Avail::NotApplicable;
     }
     if lib_vbd_ext {
-        return if vbds().any(|v| v.ext.is_some()) {
-            Avail::Lib
-        } else {
-            Avail::Missing
-        };
+        return coverage_status(latency_coverage(snap), Avail::Lib);
     }
     let idx = c.vbd3();
-    let mut found = false;
     if !idx.is_empty() {
         for d in &mut snap.domains {
             for v in d.vbds.iter_mut().filter(|v| v.kind == VbdKind::Vbd3) {
                 v.ext = idx.get(&(d.id, v.dev)).copied();
-                found |= v.ext.is_some();
             }
         }
     }
-    if found {
-        Avail::Fallback
-    } else {
-        Avail::Missing
-    }
+    coverage_status(latency_coverage(snap), Avail::Fallback)
 }
 
 #[cfg(test)]
@@ -168,6 +192,7 @@ mod tests {
     struct Fake {
         pcpu: Option<Vec<(u32, u64)>>,
         vifs: HashMap<(u32, u32), NetRaw>,
+        vifs_failed: bool,
         runnable: HashMap<u32, u64>,
         vbd3: HashMap<(u32, u32), VbdExt>,
         asked: Vec<&'static str>,
@@ -178,9 +203,9 @@ mod tests {
             self.asked.push("pcpu");
             self.pcpu.clone()
         }
-        fn vifs(&mut self) -> HashMap<(u32, u32), NetRaw> {
+        fn vifs(&mut self) -> Option<HashMap<(u32, u32), NetRaw>> {
             self.asked.push("vifs");
-            self.vifs.clone()
+            (!self.vifs_failed).then(|| self.vifs.clone())
         }
         fn dom_runnable_ns(&mut self, domid: u32, _: usize) -> Option<u64> {
             self.asked.push("runnable");
@@ -258,7 +283,9 @@ mod tests {
         d.nets = vec![net(0)];
         d.vcpus[0].runnable_ns = Some(5);
         d.vbds = vec![vbd(VbdKind::Vbd3, Some(VbdExt::default()))];
-        let mut s = snap(vec![dom(0), d]);
+        let mut dom0 = dom(0);
+        dom0.vcpus[0].runnable_ns = Some(1);
+        let mut s = snap(vec![dom0, d]);
         s.pcpu_idle_ns = Some(vec![(0, 1)]);
         let mut f = Fake::default();
         let g = fill(&mut s, true, &mut f);
@@ -316,7 +343,7 @@ mod tests {
         let mut s = snap(vec![dom(0), dom(1)]);
         let mut f = Fake::default();
         f.runnable.insert(1, 42);
-        assert_eq!(fill(&mut s, false, &mut f).steal, Avail::Fallback);
+        assert_eq!(fill(&mut s, false, &mut f).steal, Avail::Partial);
         assert_eq!(s.domains[0].runnable_ns, None);
         assert_eq!(s.domains[1].runnable_ns, Some(42));
 
@@ -359,6 +386,30 @@ mod tests {
         assert_eq!(
             fill(&mut s, false, &mut Fake::default()).vbd_latency,
             Avail::Missing
+        );
+    }
+
+    #[test]
+    fn missing_and_partial_measurements_are_not_complete() {
+        let mut s = snap(vec![dom(1)]);
+        let mut f = Fake {
+            vifs_failed: true,
+            ..Default::default()
+        };
+        assert_eq!(fill(&mut s, false, &mut f).vifs, Avail::Missing);
+        f.vifs_failed = false;
+        assert_eq!(fill(&mut s, false, &mut f).vifs, Avail::NotApplicable);
+        s.domains[0].vbds = vec![
+            vbd(VbdKind::Vbd3, Some(VbdExt::default())),
+            vbd(VbdKind::Vbd3, None),
+        ];
+        assert_eq!(fill(&mut s, true, &mut f).vbd_latency, Avail::Partial);
+        assert_eq!(
+            latency_coverage(&s),
+            Coverage {
+                available: 1,
+                total: 2
+            }
         );
     }
 }

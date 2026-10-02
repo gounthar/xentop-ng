@@ -23,7 +23,11 @@ impl Series {
         if self.0.len() == CAP {
             self.0.pop_front();
         }
-        self.0.push_back(if v.is_finite() { v } else { 0.0 });
+        self.0.push_back(if v.is_finite() { v } else { f64::NAN });
+    }
+    /// NaN is an internal graph gap, never a serialized metric.
+    pub fn push_optional(&mut self, v: Option<f64>) {
+        self.push(v.unwrap_or(f64::NAN));
     }
     /// The most recent `n` points, oldest first.
     pub fn tail(&self, n: usize) -> Vec<f64> {
@@ -46,7 +50,7 @@ pub struct IoHistory {
 
 impl IoHistory {
     fn push(&mut self, iops: f64, lat: Option<f64>, dt: f64, tick: u64) {
-        let iops = if iops.is_finite() { iops.max(0.0) } else { 0.0 };
+        let iops = if iops.is_finite() { iops.max(0.0) } else { f64::NAN };
         if self.iops.len() == IO_CAP {
             self.iops.pop_front();
             self.lat.pop_front();
@@ -59,7 +63,9 @@ impl IoHistory {
         } else {
             1.0 - (-dt.max(0.0) / RANK_TAU).exp()
         };
-        self.smooth += a * (iops - self.smooth);
+        if iops.is_finite() {
+            self.smooth += a * (iops - self.smooth);
+        }
         self.last_seen = tick;
     }
 }
@@ -148,12 +154,16 @@ impl History {
             .push(h.mem_total.saturating_sub(h.mem_free) as f64 / h.mem_total.max(1) as f64 * 100.0);
         self.rx.push(h.net_rx_bps);
         self.tx.push(h.net_tx_bps);
-        self.rd.push(h.disk_rd_bps);
-        self.wr.push(h.disk_wr_bps);
-        self.riops.push(h.disk_rd_iops);
-        self.wiops.push(h.disk_wr_iops);
-        self.rlat.push(h.disk_rd_lat_us.unwrap_or(0.0));
-        self.wlat.push(h.disk_wr_lat_us.unwrap_or(0.0));
+        self.rd
+            .push_optional(h.disk_samples.complete().then_some(h.disk_rd_bps));
+        self.wr
+            .push_optional(h.disk_samples.complete().then_some(h.disk_wr_bps));
+        self.riops
+            .push_optional(h.disk_samples.complete().then_some(h.disk_rd_iops));
+        self.wiops
+            .push_optional(h.disk_samples.complete().then_some(h.disk_wr_iops));
+        self.rlat.push_optional(h.disk_rd_lat_us);
+        self.wlat.push_optional(h.disk_wr_lat_us);
 
         for d in &r.domains {
             let e = self.doms.entry(d.id).or_default();
@@ -170,9 +180,9 @@ impl History {
             e.cpu.push(d.cpu_pct);
             e.rx.push(d.net_rx_bps);
             e.tx.push(d.net_tx_bps);
-            e.rd.push(d.disk_rd_bps);
-            e.wr.push(d.disk_wr_bps);
-            e.lat.push(d.lat_us().unwrap_or(0.0));
+            e.rd.push_optional(d.disk_samples.complete().then_some(d.disk_rd_bps));
+            e.wr.push_optional(d.disk_samples.complete().then_some(d.disk_wr_bps));
+            e.lat.push_optional(d.lat_us());
             e.mem.push(d.mem as f64);
             if e.vcpus.len() != d.vcpu_pct.len() {
                 e.vcpus = vec![Series::default(); d.vcpu_pct.len()];
@@ -191,7 +201,16 @@ impl History {
         };
         for s in &r.srs {
             let e = self.srs.entry(s.sr.clone()).or_default();
-            e.push(s.iops(), worst(s.rd_lat_us, s.wr_lat_us), dt, tick);
+            e.push(
+                if s.disk_samples.complete() {
+                    s.iops()
+                } else {
+                    f64::NAN
+                },
+                worst(s.rd_lat_us, s.wr_lat_us),
+                dt,
+                tick,
+            );
         }
         for d in &r.domains {
             for v in d.vbds.iter().filter(|v| v.backing.group().is_some()) {
@@ -230,6 +249,15 @@ mod tests {
     }
 
     #[test]
+    fn missing_history_is_a_gap_not_zero() {
+        let mut s = Series::default();
+        s.push_optional(Some(0.0));
+        s.push_optional(None);
+        assert_eq!(s.tail(2)[0], 0.0);
+        assert!(s.tail(2)[1].is_nan());
+    }
+
+    #[test]
     fn rows_hold_their_place_on_noise() {
         let mut order = vec!["a", "b", "c"];
         // b is a little busier than a: not enough to move.
@@ -265,10 +293,14 @@ mod tests {
         // A one-second spike moves the average by about a tenth of it.
         h.push(1100.0, Some(500.0), 1.0, 2);
         assert!((h.smooth - 195.2).abs() < 1.0, "{}", h.smooth);
+        let before_gap = h.smooth;
         for t in 3..200 {
             h.push(f64::NAN, None, 1.0, t);
         }
-        assert!(h.smooth < 1e-3);
+        assert_eq!(h.smooth, before_gap, "missing is not idle");
+        assert!(h.iops.iter().all(|v| v.is_nan()));
+        h.push(0.0, None, 200.0, 200);
+        assert!(h.smooth < 1e-3, "real idle measurements decay the average");
         assert_eq!(h.iops.len(), IO_CAP);
         assert_eq!(h.lat.len(), IO_CAP);
     }

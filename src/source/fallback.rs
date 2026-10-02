@@ -172,17 +172,17 @@ impl Drop for XcDomRunstate {
 /// VIF counters by (domid, devid), parsed from /proc/net/dev. Counters are
 /// from dom0's side, like libxenstat's. Read through PID 1 so we see the
 /// initial network namespace (where VIFs live) whatever ours is.
-pub fn proc_net_vifs() -> HashMap<(u32, u32), NetRaw> {
+pub fn proc_net_vifs() -> Option<HashMap<(u32, u32), NetRaw>> {
     for path in ["/proc/1/net/dev", "/proc/net/dev"] {
         if let Ok(f) = File::open(path) {
             let mut s = String::new();
             // Bounded: a few hundred bytes per interface.
             if f.take(4 << 20).read_to_string(&mut s).is_ok() {
-                return parse_proc_net_dev(&s);
+                return Some(parse_proc_net_dev(&s));
             }
         }
     }
-    HashMap::new()
+    None
 }
 
 fn parse_proc_net_dev(s: &str) -> HashMap<(u32, u32), NetRaw> {

@@ -267,7 +267,13 @@ pub static COLUMNS: &[Column] = &[
         sort: Sort::Desc(|d| d.disk_rd_bps),
         render: |cx, d, w| {
             let v = d.disk_rd_bps;
-            num(cx.th, fmt::rate(v), v < 0.5, w, cx.th.rd.at(1.0))
+            num(
+                cx.th,
+                d.disk_samples.label(fmt::rate(v)),
+                v < 0.5,
+                w,
+                cx.th.rd.at(1.0),
+            )
         },
     },
     Column {
@@ -283,7 +289,13 @@ pub static COLUMNS: &[Column] = &[
         sort: Sort::Desc(|d| d.disk_wr_bps),
         render: |cx, d, w| {
             let v = d.disk_wr_bps;
-            num(cx.th, fmt::rate(v), v < 0.5, w, cx.th.wr.at(1.0))
+            num(
+                cx.th,
+                d.disk_samples.label(fmt::rate(v)),
+                v < 0.5,
+                w,
+                cx.th.wr.at(1.0),
+            )
         },
     },
     Column {
@@ -299,7 +311,7 @@ pub static COLUMNS: &[Column] = &[
         sort: Sort::Desc(|d| d.disk_rd_iops + d.disk_wr_iops),
         render: |cx, d, w| {
             let v = d.disk_rd_iops + d.disk_wr_iops;
-            num(cx.th, fmt::count(v), v < 0.5, w, cx.th.fg)
+            num(cx.th, d.disk_samples.label(fmt::count(v)), v < 0.5, w, cx.th.fg)
         },
     },
     Column {

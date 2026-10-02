@@ -22,6 +22,8 @@ pub enum Avail {
     Missing,
     /// Nothing to report on this host (e.g. no tapdisk3 disks).
     NotApplicable,
+    /// Only some eligible entities have measurements.
+    Partial,
 }
 
 /// Whether names come from xapi (XCP-ng/XenServer toolstack).
@@ -41,6 +43,8 @@ pub enum XapiState {
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct DataStatus {
+    pub vbd_latency_coverage: crate::model::Coverage,
+    pub steal_coverage: crate::model::Coverage,
     pub pcpu: Avail,
     pub vbd_latency: Avail,
     pub vifs: Avail,
@@ -57,12 +61,27 @@ pub struct DataStatus {
 
 impl DataStatus {
     pub fn degraded(&self) -> bool {
-        [self.pcpu, self.vbd_latency, self.vifs, self.storage].contains(&Avail::Missing)
+        [self.pcpu, self.vbd_latency, self.vifs, self.storage]
+            .iter()
+            .any(|a| matches!(a, Avail::Missing | Avail::Partial))
+            || self.steal == Avail::Partial
     }
     /// Storage mapping always comes from xenstore, so it doesn't count:
     /// this flags gaps in libxenstat only.
     pub fn uses_fallback(&self) -> bool {
         [self.pcpu, self.vbd_latency, self.vifs].contains(&Avail::Fallback)
+    }
+}
+
+pub fn coverage_status(c: crate::model::Coverage, origin: Avail) -> Avail {
+    if c.total == 0 {
+        Avail::NotApplicable
+    } else if c.available == 0 {
+        Avail::Missing
+    } else if !c.complete() {
+        Avail::Partial
+    } else {
+        origin
     }
 }
 

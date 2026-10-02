@@ -39,7 +39,12 @@ pub(super) fn header(buf: &mut Buffer, app: &App, area: Rect) {
     // Subtle hint when some data is missing or rebuilt by fallbacks
     // (libxenstat patches not upstream yet). Details behind `i`.
     let mut left = left;
-    if app.status.degraded() {
+    if app.status.degraded()
+        || app
+            .rates
+            .as_ref()
+            .is_some_and(|r| !r.host.disk_samples.complete())
+    {
         left.push_span(Span::styled("  ◐ partial data", Style::new().fg(th.warn)));
         left.push_span(dim(th, " (i)"));
     } else if app.status.uses_fallback() {

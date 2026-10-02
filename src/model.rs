@@ -209,8 +209,30 @@ pub struct VbdExt {
 // ---------------------------------------------------------------------------
 // Rates
 
+/// Measurement coverage: sums include only the available devices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Coverage {
+    pub available: usize,
+    pub total: usize,
+}
+impl Coverage {
+    pub fn complete(self) -> bool {
+        self.available == self.total
+    }
+    pub fn label(self, value: String) -> String {
+        if self.total > 0 && self.available == 0 {
+            "-".into()
+        } else if !self.complete() {
+            format!("{value}*")
+        } else {
+            value
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct HostRates {
+    pub disk_samples: Coverage,
     pub hostname: String,
     pub xen_version: String,
     pub num_cpus: u32,
@@ -243,6 +265,7 @@ pub struct HostRates {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DomRates {
+    pub disk_samples: Coverage,
     /// No compatible preceding domain sample; start history afresh.
     pub baseline_reset: bool,
     pub id: u32,
@@ -320,6 +343,7 @@ pub struct VbdRates {
 /// VBD on it.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SrRates {
+    pub disk_samples: Coverage,
     /// SR UUID, or the backing directory when there is no SR.
     pub sr: String,
     /// SR name-label (xapi only).
@@ -630,6 +654,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                     }
                 }
             }
+            r.disk_samples.total += 1;
+            r.disk_samples.available += usize::from(vr.stats_valid);
             r.disk_rd_bps += vr.rd_bps;
             r.disk_wr_bps += vr.wr_bps;
             r.disk_rd_iops += vr.rd_iops;
@@ -639,6 +665,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             if let Some(key) = vr.backing.group() {
                 let a = srs.entry(key).or_default();
                 a.r.vbds += 1;
+                a.r.disk_samples.total += 1;
+                a.r.disk_samples.available += usize::from(vr.stats_valid);
                 if a.r.kind.is_none() {
                     a.r.kind = vr.backing.sr_kind.clone();
                 }
@@ -662,6 +690,8 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
 
         host.net_rx_bps += r.net_rx_bps;
         host.net_tx_bps += r.net_tx_bps;
+        host.disk_samples.total += r.disk_samples.total;
+        host.disk_samples.available += r.disk_samples.available;
         host.disk_rd_bps += r.disk_rd_bps;
         host.disk_wr_bps += r.disk_wr_bps;
         host.disk_rd_iops += r.disk_rd_iops;
