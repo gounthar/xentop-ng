@@ -125,10 +125,7 @@ pub struct XenstatSource {
 impl XenstatSource {
     pub fn open(explicit: Option<&str>) -> Result<Self> {
         let names = match explicit {
-            Some(p) => {
-                dl::check_explicit_path(p)?;
-                vec![p.to_string()]
-            }
+            Some(p) => vec![dl::checked_path(p)?],
             None => dl::versioned("libxenstat"),
         };
         let (lib, lib_name) = dl::open_first(&names).map_err(|e| {
