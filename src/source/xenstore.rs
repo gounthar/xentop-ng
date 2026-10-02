@@ -108,6 +108,33 @@ pub struct StorageMap {
     /// (domid, dev) -> (params, backing): re-parsed only when params change.
     vbds: HashMap<(u32, u32), (String, Option<Backing>)>,
     kinds: SrKinds,
+    identities: VmIdentities,
+}
+
+/// Retain only successful UUID reads while the observed domain remains
+/// continuous. Always retry xenstore, including after a failed first read.
+#[derive(Default)]
+struct VmIdentities(HashMap<u32, (String, u64, String)>);
+
+impl VmIdentities {
+    fn resolve(&mut self, id: u32, name: &str, cpu_ns: u64, observed: Option<String>) -> Option<String> {
+        let uuid = observed.or_else(|| {
+            self.0
+                .get(&id)
+                .filter(|(n, cpu, _)| n == name && cpu_ns >= *cpu)
+                .map(|(_, _, uuid)| uuid.clone())
+        });
+        if let Some(uuid) = &uuid {
+            self.0.insert(id, (name.into(), cpu_ns, uuid.clone()));
+        } else {
+            self.0.remove(&id);
+        }
+        uuid
+    }
+    fn retain(&mut self, snap: &Snapshot) {
+        let present: HashSet<_> = snap.domains.iter().map(|d| d.id).collect();
+        self.0.retain(|id, _| present.contains(id));
+    }
 }
 
 /// SR UUID -> flavour, worked out once per SR.
@@ -127,11 +154,13 @@ impl StorageMap {
             xs: Xs::open(),
             vbds: HashMap::new(),
             kinds: SrKinds::default(),
+            identities: VmIdentities::default(),
         }
     }
 
     /// Annotate `snap` and say how complete the mapping is.
     pub fn fill(&mut self, snap: &mut Snapshot) -> Avail {
+        self.identities.retain(snap);
         self.kinds.tick += 1;
         self.kinds.mounts = None;
         let Some(xs) = &self.xs else {
@@ -152,7 +181,8 @@ impl StorageMap {
             let base = format!("/local/domain/{}", d.id);
             // Read identity each time: domids are reusable, names are mutable,
             // and a failed read at startup must not be cached forever.
-            d.vm_uuid = xs.read(&format!("{base}/vm")).and_then(|p| vm_uuid(&p));
+            let observed = xs.read(&format!("{base}/vm")).and_then(|p| vm_uuid(&p));
+            d.vm_uuid = self.identities.resolve(d.id, &d.name, d.cpu_ns, observed);
             d.mem_target = xs
                 .read(&format!("{base}/memory/target"))
                 .and_then(|s| parse_kib(&s));
@@ -444,6 +474,59 @@ mod tests {
             vdi: Some(vdi.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn cached_uuid_preserves_rates_until_a_different_uuid_is_observed() {
+        use crate::source::{
+            demo::{DemoConfig, DemoSource},
+            Source,
+        };
+        let mut ids = VmIdentities::default();
+        let mut a = DemoSource::new(&DemoConfig::default()).sample().unwrap();
+        a.domains.truncate(1);
+        let d = &mut a.domains[0];
+        d.vm_uuid = ids.resolve(d.id, &d.name, d.cpu_ns, Some("uuid-a".into()));
+        let mut b = a.clone();
+        b.at += std::time::Duration::from_secs(1);
+        let d = &mut b.domains[0];
+        d.cpu_ns += 100;
+        d.vm_uuid = ids.resolve(d.id, &d.name, d.cpu_ns, None);
+        assert!(!crate::model::compute(&a, &b).domains[0].baseline_reset);
+        let mut c = b.clone();
+        c.at += std::time::Duration::from_secs(1);
+        let d = &mut c.domains[0];
+        d.cpu_ns += 100;
+        d.vm_uuid = ids.resolve(d.id, &d.name, d.cpu_ns, Some("uuid-b".into()));
+        assert!(crate::model::compute(&b, &c).domains[0].baseline_reset);
+        c.domains.clear();
+        ids.retain(&c);
+        assert!(ids.0.is_empty(), "departed domains cannot leave cached UUIDs");
+    }
+
+    #[test]
+    fn transient_uuid_failures_keep_identity_but_replacements_do_not() {
+        let mut ids = VmIdentities::default();
+        let a = Some("uuid-a".to_string());
+        let b = Some("uuid-b".to_string());
+        assert_eq!(ids.resolve(5, "vm", 10, None), None);
+        assert_eq!(ids.resolve(5, "vm", 20, a.clone()), a);
+        assert_eq!(ids.resolve(5, "vm", 30, None), a);
+        assert_eq!(ids.resolve(5, "vm", 40, None), a);
+        assert_eq!(ids.resolve(5, "vm", 50, b.clone()), b);
+        assert_eq!(ids.resolve(5, "rename", 60, b.clone()), b);
+        assert_eq!(ids.resolve(5, "rename", 70, None), b);
+        assert_eq!(
+            ids.resolve(5, "rename", 1, None),
+            None,
+            "counter rollback invalidates cached identity"
+        );
+        ids.resolve(5, "rename", 10, a);
+        assert_eq!(
+            ids.resolve(5, "other", 20, None),
+            None,
+            "unverified rename is conservative"
+        );
     }
 
     #[test]
