@@ -38,19 +38,10 @@ pub struct XcCpuInfo {
 type XcOpen = unsafe extern "C" fn(*mut c_void, *mut c_void, c_uint) -> *mut c_void;
 
 fn libxenctrl() -> Option<Library> {
-    let names: Vec<String> = (10..=40)
-        .rev()
-        .map(|m| format!("libxenctrl.so.4.{m}"))
-        .chain(["libxenctrl.so".to_string()])
-        .collect();
+    let names = super::dl::versioned("libxenctrl");
     // Prefer the libxenctrl that libxenstat itself pulled in, so both
     // talk to the hypervisor through the same version.
-    let loaded = names.iter().find_map(|n| {
-        unsafe { libloading::os::unix::Library::open(Some(n), libc::RTLD_NOW | libc::RTLD_NOLOAD) }
-            .ok()
-            .map(Library::from)
-    });
-    loaded.or_else(|| names.iter().find_map(|n| unsafe { Library::new(n) }.ok()))
+    super::dl::already_loaded(&names).or_else(|| super::dl::open_first(&names).ok().map(|(l, _)| l))
 }
 
 impl XcCpuInfo {

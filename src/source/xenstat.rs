@@ -6,6 +6,7 @@
 //! xentop-ng libxenstat patches are optional: when absent, the matching
 //! columns simply show "-".
 
+use super::dl;
 use super::fallback::{self, Vbd3Index, XcCpuInfo, XcDomRunstate};
 use super::xapi::Xapi;
 use super::xenstore::StorageMap;
@@ -121,42 +122,21 @@ pub struct XenstatSource {
     _lib: Library,
 }
 
-fn candidates() -> Vec<String> {
-    let mut v = Vec::new();
-    // Versioned names first so LD_LIBRARY_PATH overrides (which usually only
-    // ship the versioned file) win over the system development symlink.
-    for minor in (10..=40).rev() {
-        v.push(format!("libxenstat.so.4.{minor}"));
-    }
-    v.push("libxenstat.so".into());
-    v
-}
-
 impl XenstatSource {
     pub fn open(explicit: Option<&str>) -> Result<Self> {
         let names = match explicit {
             Some(p) => {
-                check_lib_path(p)?;
+                dl::check_explicit_path(p)?;
                 vec![p.to_string()]
             }
-            None => candidates(),
+            None => dl::versioned("libxenstat"),
         };
-        let mut last_err = None;
-        let (lib, lib_name) = names
-            .into_iter()
-            .find_map(|n| match unsafe { Library::new(&n) } {
-                Ok(l) => Some((l, n)),
-                Err(e) => {
-                    last_err = Some(e);
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "could not load libxenstat ({}); is this a Xen dom0? Try --demo",
-                    last_err.map(|e| e.to_string()).unwrap_or_default()
-                )
-            })?;
+        let (lib, lib_name) = dl::open_first(&names).map_err(|e| {
+            anyhow!(
+                "could not load libxenstat ({}); is this a Xen dom0? Try --demo",
+                e.map(|e| e.to_string()).unwrap_or_default()
+            )
+        })?;
 
         macro_rules! req {
             ($name:literal) => {
@@ -271,33 +251,6 @@ impl XenstatSource {
             _lib: lib,
         })
     }
-}
-
-/// `--lib` loads code into a root process. If xentop-ng is ever granted to
-/// someone through sudo, that must not become "run any .so as root": as
-/// root, only accept an absolute path to a root-owned file whose directories
-/// are all root-owned and not group/world-writable.
-fn check_lib_path(p: &str) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    if unsafe { libc::geteuid() } != 0 {
-        return Ok(());
-    }
-    let path = std::path::Path::new(p);
-    if !path.is_absolute() {
-        bail!("--lib needs an absolute path when running as root");
-    }
-    let real = std::fs::canonicalize(path).with_context(|| format!("--lib {p}"))?;
-    for a in real.ancestors() {
-        let m = std::fs::metadata(a).with_context(|| format!("--lib: {}", a.display()))?;
-        if m.uid() != 0 || m.mode() & 0o022 != 0 {
-            bail!(
-                "--lib: refusing {}: {} must be owned by root and not group/world-writable",
-                p,
-                a.display()
-            );
-        }
-    }
-    Ok(())
 }
 
 fn cstr(p: *const c_char) -> String {

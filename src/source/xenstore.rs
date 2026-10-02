@@ -51,9 +51,8 @@ struct Xs {
 
 impl Xs {
     fn open() -> Option<Self> {
-        let lib = ["libxenstore.so.4", "libxenstore.so.3.0", "libxenstore.so"]
-            .iter()
-            .find_map(|n| unsafe { Library::new(*n) }.ok())?;
+        let (lib, _) =
+            super::dl::open_first(&["libxenstore.so.4", "libxenstore.so.3.0", "libxenstore.so"]).ok()?;
         unsafe {
             type Open = unsafe extern "C" fn(c_ulong) -> Handle;
             let open: Open = *lib.get(b"xs_open\0").ok()?;
