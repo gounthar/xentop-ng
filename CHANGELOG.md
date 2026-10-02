@@ -3,6 +3,25 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- The SR view (`v`) lists the SRs plugged into the host even when no VM
+  uses them, instead of "no storage mapping (xenstore)" on a host with no
+  running VM ([#6](https://github.com/olivierlambert/xentop-ng/issues/6)).
+  They come from xapi; DVD drives, removable media and ISO libraries are
+  left out. Without xapi, an empty view now says no VM disk is active,
+  and "no storage mapping" only shows when disks can't be mapped.
+
+### Security
+
+- `--lib PATH` as root loaded the path as given after checking the file it
+  resolved to. If the path went through a symlink in a directory its owner
+  controls, the symlink could be swapped in between and another library
+  loaded as root (relevant when xentop-ng is granted through sudo). It now
+  loads the file it checked.
+
 ## [0.4.0] - 2026-10-02
 
 ### Added

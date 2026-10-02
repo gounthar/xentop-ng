@@ -1,5 +1,6 @@
 //! Names from xapi, the XCP-ng/XenServer toolstack: SR and VDI name-labels,
-//! SR types, and the network behind each VIF.
+//! SR types, the network behind each VIF, and the SRs plugged into this
+//! host (so the SR view lists them even when no VM uses them).
 //!
 //! Optional by design. On a host without xapi's socket (plain Xen) nothing
 //! here runs and everything else works as before; on an XCP-ng host the
@@ -17,7 +18,7 @@
 //! xenstore values: sanitised and bounded before display.
 
 use super::XapiState;
-use crate::model::Snapshot;
+use crate::model::{HostSr, Snapshot};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -30,6 +31,10 @@ use std::time::{Duration, Instant};
 
 /// Where xapi listens in dom0 (current, then older XenServer releases).
 const SOCKETS: [&str; 2] = ["/var/lib/xcp/xapi", "/var/xapi/xapi"];
+/// Holds this host's UUID (INSTALLATION_UUID).
+const INVENTORY: &str = "/etc/xensource-inventory";
+/// Most PBDs (plugged SRs) we look at on one host.
+const MAX_PBDS: usize = 256;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest response body we accept.
 const MAX_RESPONSE: usize = 8 << 20;
@@ -61,6 +66,8 @@ struct Names {
     vdis: HashMap<String, String>,
     /// VM UUID -> VIF devid -> network name.
     vifs: HashMap<String, BTreeMap<u32, String>>,
+    /// SRs plugged into this host.
+    host_srs: Vec<HostSr>,
 }
 
 /// UUIDs the current sample would like named.
@@ -106,10 +113,14 @@ impl Xapi {
     /// Xen). Nothing is sent to xapi until the first sample.
     pub fn open() -> Option<Self> {
         let path = SOCKETS.iter().map(Path::new).find(|p| is_socket(p))?;
-        Some(Self::with_socket(path.to_path_buf()))
+        let host = std::fs::read_to_string(INVENTORY)
+            .ok()
+            .and_then(|s| installation_uuid(&s));
+        Some(Self::with_socket(path.to_path_buf(), host))
     }
 
-    fn with_socket(path: PathBuf) -> Self {
+    /// `host`: this host's UUID, to list its SRs; None skips that.
+    fn with_socket(path: PathBuf, host: Option<String>) -> Self {
         let names = Arc::new(Mutex::new(Names {
             state: XapiState::Connecting,
             ..Default::default()
@@ -121,6 +132,8 @@ impl Xapi {
             names: names.clone(),
             done: Wants::default(),
             networks: HashMap::new(),
+            host,
+            host_srs_done: false,
         };
         let spawned = std::thread::Builder::new()
             .name("xapi".into())
@@ -154,6 +167,7 @@ impl Xapi {
         let Ok(n) = self.names.lock() else {
             return;
         };
+        snap.host_srs = n.host_srs.clone();
         for d in &mut snap.domains {
             for b in d.vbds.iter_mut().filter_map(|v| v.backing.as_mut()) {
                 if let Some(sr) = b.sr.as_ref().and_then(|u| n.srs.get(u)) {
@@ -192,6 +206,15 @@ fn is_socket(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.file_type().is_socket())
 }
 
+/// INSTALLATION_UUID='…' from xensource-inventory.
+fn installation_uuid(inventory: &str) -> Option<String> {
+    inventory.lines().find_map(|l| {
+        let v = l.trim().strip_prefix("INSTALLATION_UUID=")?;
+        let v = v.trim_matches(|c| c == '\'' || c == '"');
+        (v.len() == 36 && v.chars().all(|c| c.is_ascii_hexdigit() || c == '-')).then(|| v.to_string())
+    })
+}
+
 /// Sanitised, bounded copy of a name; None when empty.
 fn clean(s: &str, max: usize) -> Option<String> {
     let s: String = crate::fmt::sanitize(s.trim()).chars().take(max).collect();
@@ -209,6 +232,10 @@ struct Worker {
     done: Wants,
     /// Network ref -> name, for this refresh.
     networks: HashMap<String, Option<String>>,
+    /// This host's UUID, to list its SRs.
+    host: Option<String>,
+    /// Host SRs read since the last refresh.
+    host_srs_done: bool,
 }
 
 impl Worker {
@@ -234,6 +261,7 @@ impl Worker {
             if refreshed.elapsed() >= REFRESH {
                 self.done = Wants::default();
                 self.networks.clear();
+                self.host_srs_done = false;
                 refreshed = Instant::now();
             }
             self.round(&wants);
@@ -332,7 +360,60 @@ impl Worker {
             }
             self.done.vms.insert(u, ids);
         }
+
+        if !self.host_srs_done {
+            if let Some(host) = self.host.clone() {
+                let srs = skip_unknown(self.host_srs(&host))?.unwrap_or_default();
+                self.names.lock().map_err(|_| "poisoned")?.host_srs = srs;
+            }
+            self.host_srs_done = true;
+        }
         Ok(())
+    }
+
+    /// The SRs currently plugged into `host`, minus DVD drives, removable
+    /// media and ISO libraries (no VM disk I/O to show there).
+    fn host_srs(&mut self, host: &str) -> Result<Vec<HostSr>, Error> {
+        let h = self.rpc.call("host.get_by_uuid", &[host.into()])?;
+        let pbds = self.rpc.call("host.get_PBDs", &[h])?;
+        let mut out = Vec::new();
+        for pbd in pbds.as_array().into_iter().flatten().take(MAX_PBDS) {
+            let Some(rec) = skip_unknown(self.rpc.call("PBD.get_record", std::slice::from_ref(pbd)))
+                .map_err(Error::Down)?
+            else {
+                continue;
+            };
+            if rec.get("currently_attached").and_then(Value::as_bool) != Some(true) {
+                continue;
+            }
+            let Some(sr) = rec.get("SR").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(rec) =
+                skip_unknown(self.rpc.call("SR.get_record", &[sr.into()])).map_err(Error::Down)?
+            else {
+                continue;
+            };
+            let field = |k: &str, max| rec.get(k).and_then(Value::as_str).and_then(|s| clean(s, max));
+            let kind = field("type", MAX_KIND);
+            if kind.as_deref() == Some("udev") || field("content_type", MAX_KIND).as_deref() == Some("iso") {
+                continue;
+            }
+            let Some(uuid) = rec
+                .get("uuid")
+                .and_then(Value::as_str)
+                .filter(|u| u.len() == 36 && u.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+            else {
+                continue;
+            };
+            out.push(HostSr {
+                uuid: uuid.to_string(),
+                name: field("name_label", MAX_NAME),
+                kind,
+            });
+        }
+        out.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+        Ok(out)
     }
 
     fn sr(&mut self, uuid: &str) -> Result<SrName, Error> {
@@ -743,6 +824,7 @@ mod tests {
                 mem_target: None,
                 runnable_ns: None,
             }],
+            host_srs: Vec::new(),
         }
     }
 
@@ -782,7 +864,7 @@ mod tests {
                 _ => return Err(json!(["HANDLE_INVALID", m])),
             })
         });
-        let mut x = Xapi::with_socket(path);
+        let mut x = Xapi::with_socket(path, None);
         let s = fill_until(&mut x, |s| {
             let d = &s.domains[0];
             d.vbds[0].backing.as_ref().unwrap().vdi_name.is_some() && d.nets[0].network.is_some()
@@ -820,7 +902,7 @@ mod tests {
             "session.login_with_password" => Ok(json!("OpaqueRef:session")),
             _ => Ok(json!("")),
         });
-        let mut x = Xapi::with_socket(path);
+        let mut x = Xapi::with_socket(path, None);
         let t = Instant::now();
         while x.state() == XapiState::Connecting && t.elapsed() < Duration::from_secs(5) {
             let mut s = snapshot();
@@ -834,7 +916,7 @@ mod tests {
     #[test]
     fn refused_login_is_reported() {
         let (path, _) = fake_xapi(|_, _| Err(json!(["SESSION_AUTHENTICATION_FAILED", "root"])));
-        let mut x = Xapi::with_socket(path);
+        let mut x = Xapi::with_socket(path, None);
         let t = Instant::now();
         while matches!(x.state(), XapiState::Connecting) && t.elapsed() < Duration::from_secs(5) {
             x.fill(&mut snapshot());
@@ -853,10 +935,88 @@ mod tests {
         );
     }
 
+    /// The host's plugged SRs, even with no VM: issue #6.
+    #[test]
+    fn host_srs_listed_without_any_vm() {
+        const HOST: &str = "0b1c2d3e-0000-4000-8000-00000000abcd";
+        const NFS: &str = "11111111-2222-4333-8444-555555555555";
+        let (path, _) = fake_xapi(|m, p| {
+            let arg = p.get(1).and_then(Value::as_str).unwrap_or("");
+            Ok(match m {
+                "session.login_with_password" => json!("OpaqueRef:session"),
+                "host.get_by_uuid" if arg == HOST => json!("OpaqueRef:host"),
+                "host.get_PBDs" => json!([
+                    "pbd:local",
+                    "pbd:nfs",
+                    "pbd:dvd",
+                    "pbd:tools",
+                    "pbd:unplugged",
+                    "pbd:bad"
+                ]),
+                "PBD.get_record" => {
+                    let sr = arg.trim_start_matches("pbd:");
+                    json!({"currently_attached": sr != "unplugged", "SR": format!("sr:{sr}")})
+                }
+                "SR.get_record" => match arg {
+                    "sr:local" => {
+                        json!({"uuid": SR, "name_label": "Local NVMe", "type": "ext", "content_type": "user"})
+                    }
+                    "sr:nfs" => {
+                        json!({"uuid": NFS, "name_label": "TrueNAS", "type": "nfs", "content_type": ""})
+                    }
+                    "sr:dvd" => {
+                        json!({"uuid": SR, "name_label": "DVD drives", "type": "udev", "content_type": "iso"})
+                    }
+                    "sr:tools" => {
+                        json!({"uuid": SR, "name_label": "XCP-ng Tools", "type": "iso", "content_type": "iso"})
+                    }
+                    "sr:unplugged" => json!({"uuid": SR, "name_label": "Old", "type": "ext"}),
+                    "sr:bad" => json!({"uuid": "../../etc", "name_label": "x", "type": "ext"}),
+                    _ => return Err(json!(["HANDLE_INVALID", arg])),
+                },
+                _ => json!(""),
+            })
+        });
+        let mut x = Xapi::with_socket(path, Some(HOST.into()));
+        let t = Instant::now();
+        let s = loop {
+            let mut s = snapshot();
+            s.domains.clear();
+            x.fill(&mut s);
+            if !s.host_srs.is_empty() || t.elapsed() > Duration::from_secs(5) {
+                break s;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let got: Vec<(&str, Option<&str>, Option<&str>)> = s
+            .host_srs
+            .iter()
+            .map(|h| (h.uuid.as_str(), h.name.as_deref(), h.kind.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (NFS, Some("TrueNAS"), Some("nfs")),
+                (SR, Some("Local NVMe"), Some("ext"))
+            ]
+        );
+    }
+
+    #[test]
+    fn installation_uuid_from_inventory() {
+        let inv = "PRODUCT_BRAND='XCP-ng'\nINSTALLATION_UUID='0b1c2d3e-0000-4000-8000-00000000abcd'\nCONTROL_DOMAIN_UUID='x'\n";
+        assert_eq!(
+            installation_uuid(inv).as_deref(),
+            Some("0b1c2d3e-0000-4000-8000-00000000abcd")
+        );
+        assert_eq!(installation_uuid("INSTALLATION_UUID='not-a-uuid'"), None);
+        assert_eq!(installation_uuid(""), None);
+    }
+
     #[test]
     fn no_xapi_socket() {
         assert!(!is_socket(Path::new("/nonexistent/xapi")));
-        let mut x = Xapi::with_socket("/nonexistent/xapi".into());
+        let mut x = Xapi::with_socket("/nonexistent/xapi".into(), None);
         let t = Instant::now();
         while matches!(x.state(), XapiState::Connecting) && t.elapsed() < Duration::from_secs(5) {
             x.fill(&mut snapshot());

@@ -19,6 +19,18 @@ pub struct Snapshot {
     /// `None` when the loaded libxenstat lacks `xenstat_node_pcpu_idle_ns`.
     pub pcpu_idle_ns: Option<Vec<(u32, u64)>>,
     pub domains: Vec<DomainRaw>,
+    /// SRs plugged into this host (xapi only), listed even when no VM
+    /// disk on them is active.
+    pub host_srs: Vec<HostSr>,
+}
+
+/// A storage repository plugged into this host, as xapi reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostSr {
+    pub uuid: String,
+    pub name: Option<String>,
+    /// SR type ("ext", "nfs", "lvmoiscsi"...).
+    pub kind: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -645,6 +657,16 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
         }
     }
 
+    // SRs with no active disk still get a row, idle.
+    for h in &cur.host_srs {
+        let a = srs.entry(h.uuid.clone()).or_default();
+        if h.kind.is_some() {
+            a.r.kind = h.kind.clone();
+        }
+        if a.r.name.is_none() {
+            a.r.name = h.name.clone();
+        }
+    }
     let srs = finish_srs(srs, &domains);
     Rates {
         interval_s: dt,
@@ -692,6 +714,7 @@ mod rate_tests {
             free_mem: 0,
             pcpu_idle_ns: None,
             domains: doms,
+            host_srs: Vec::new(),
         }
     }
 
@@ -848,6 +871,47 @@ mod rate_tests {
         assert_eq!((b.sr.as_str(), b.vbds, b.top_id), ("B", 1, Some(1)));
         assert_eq!(b.rd_lat_us, Some(5000.0));
         assert_eq!(r.domains[0].vbds[1].backing.sr.as_deref(), Some("B"));
+    }
+
+    /// SRs plugged into the host get a row even with no active disk on
+    /// them (issue #6), and xapi's exact type wins over the local guess.
+    #[test]
+    fn idle_host_srs_are_listed() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(1);
+        let host = |uuid: &str, name: &str, kind: &str| HostSr {
+            uuid: uuid.into(),
+            name: Some(name.into()),
+            kind: Some(kind.into()),
+        };
+        let mut prev = snap(t0, vec![]);
+        let mut cur = snap(t1, vec![]);
+        prev.host_srs = vec![host("A", "Local NVMe", "ext")];
+        cur.host_srs = vec![host("A", "Local NVMe", "ext"), host("B", "TrueNAS", "nfs")];
+        let r = compute(&prev, &cur);
+        let rows: Vec<(&str, Option<&str>, usize, f64)> = r
+            .srs
+            .iter()
+            .map(|s| (s.sr.as_str(), s.name.as_deref(), s.vbds, s.iops()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("A", Some("Local NVMe"), 0, 0.0), ("B", Some("TrueNAS"), 0, 0.0)]
+        );
+
+        // A busy disk on B: B comes first, with xapi's type.
+        let mk = |vbd| DomainRaw {
+            vbds: vec![vbd],
+            ..dom(1, "vm1", 0, 0)
+        };
+        let mut prev = snap(t0, vec![mk(on_sr(Some("B"), 0, 0))]);
+        let mut cur = snap(t1, vec![mk(on_sr(Some("B"), 10, 100))]);
+        prev.host_srs = vec![host("A", "Local NVMe", "ext"), host("B", "iSCSI", "lvmoiscsi")];
+        cur.host_srs = prev.host_srs.clone();
+        let r = compute(&prev, &cur);
+        assert_eq!(r.srs[0].sr, "B");
+        assert_eq!((r.srs[0].vbds, r.srs[0].kind.as_deref()), (1, Some("lvmoiscsi")));
+        assert_eq!((r.srs[1].sr.as_str(), r.srs[1].vbds), ("A", 0));
     }
 
     /// A domain with `steal` ns of runnable time per vCPU (None: no data).
@@ -1026,6 +1090,7 @@ mod overflow_tests {
             free_mem: u64::MAX,
             pcpu_idle_ns: Some(vec![(0, u64::MAX)]),
             domains: vec![dom.clone(), DomainRaw { id: 4, ..dom }],
+            host_srs: Vec::new(),
         };
         let r = compute(
             &s,

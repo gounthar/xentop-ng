@@ -395,6 +395,7 @@ impl XenstatSource {
                 free_mem: (a.node_free_mem)(node),
                 pcpu_idle_ns,
                 domains,
+                host_srs: Vec::new(),
             }
         };
         unsafe { (a.free_node)(node) };

@@ -248,6 +248,7 @@ mod tests {
             free_mem: 0,
             pcpu_idle_ns: None,
             domains,
+            host_srs: Vec::new(),
         }
     }
 

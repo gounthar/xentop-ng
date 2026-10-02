@@ -847,6 +847,7 @@ Report bugs to <xen-devel@lists.xen.org>.
                     free_mem: num(f[2]),
                     pcpu_idle_ns: None,
                     domains: vec![],
+                    host_srs: Vec::new(),
                 });
                 continue;
             }

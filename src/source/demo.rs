@@ -947,6 +947,7 @@ impl DemoSource {
                     mem_target: d.mem_target,
                 })
                 .collect(),
+            host_srs: Vec::new(),
         }
     }
 }
