@@ -361,6 +361,7 @@ impl XenstatSource {
                             rd_sects: (a.vbd_rd_sects)(x),
                             wr_sects: (a.vbd_wr_sects)(x),
                             error: a.vbd_error.map(|f| f(x)).unwrap_or(false),
+                            connecting: false,
                             ext,
                             backing: None,
                         })
@@ -406,12 +407,16 @@ impl XenstatSource {
 impl Source for XenstatSource {
     fn sample(&mut self) -> Result<Snapshot> {
         let mut snap = self.read_node()?;
+        // Storage first: it tells disks still connecting from failed reads,
+        // which latency coverage below must not count as missing.
+        self.status.storage = self.storage.fill(&mut snap);
         let g = gaps::fill(&mut snap, self.api.ext.is_some(), &mut self.collectors);
         self.status.pcpu = g.pcpu;
         self.status.vifs = g.vifs;
         self.status.steal = g.steal;
         self.status.vbd_latency = g.vbd_latency;
-        self.status.storage = self.storage.fill(&mut snap);
+        self.status.vbd_latency_coverage = gaps::latency_coverage(&snap);
+        self.status.steal_coverage = gaps::steal_coverage(&snap);
         if let Some(x) = &mut self.xapi {
             x.fill(&mut snap);
             self.status.xapi = x.state();

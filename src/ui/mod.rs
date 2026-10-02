@@ -376,11 +376,16 @@ mod tests {
     fn app(cfg: &DemoConfig) -> App {
         let mut src = DemoSource::new(cfg);
         let hist = src.warmup(40);
-        let mut app = App::new(Box::new(src), Duration::from_secs(1), 0);
+        let status = src.status();
+        let mut app = App::new(
+            crate::source::worker::Collector::spawn(move || Ok(Box::new(src)), 0),
+            Duration::from_secs(1),
+            0,
+        );
         for s in hist {
             app.ingest(s);
         }
-        app.status = app.source.status();
+        app.status = status;
         app
     }
 

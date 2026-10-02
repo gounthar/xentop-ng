@@ -288,6 +288,7 @@ pub(super) fn info_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
                 Avail::Fallback => ("◐", th.warn, fallback),
                 Avail::Missing => ("✗", th.bad, missing),
                 Avail::NotApplicable => ("·", th.dim, na),
+                Avail::Partial => ("◐", th.warn, "partial coverage"),
             };
             Line::from(vec![
                 Span::styled(format!("{mark} "), Style::new().fg(c)),
@@ -328,6 +329,7 @@ pub(super) fn info_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
                 Avail::Lib | Avail::Fallback => ("✓", th.ok, "xenstore (VBD backend params, /vm)"),
                 Avail::Missing => ("✗", th.bad, "missing: xenstore unreadable or unmapped"),
                 Avail::NotApplicable => ("·", th.dim, "n/a: no disks"),
+                Avail::Partial => ("◐", th.warn, "partial storage mapping"),
             };
             Line::from(vec![
                 Span::styled(format!("{mark} "), Style::new().fg(c)),
@@ -358,6 +360,16 @@ pub(super) fn info_popup(buf: &mut Buffer, app: &mut App, area: Rect) {
             "n/a",
         ),
         Line::from(""),
+        Line::from(dim(
+            th,
+            format!(
+                "Latency counters: {}/{} tapdisks; steal: {}/{} domains",
+                st.vbd_latency_coverage.available,
+                st.vbd_latency_coverage.total,
+                st.steal_coverage.available,
+                st.steal_coverage.total
+            ),
+        )),
         Line::from(dim(th, "Fallbacks fill in what this libxenstat lacks. The")),
         Line::from(dim(th, "libxenstat patches in the xentop-ng repository")),
         Line::from(dim(th, "(libxenstat/) provide all of it natively; steal")),

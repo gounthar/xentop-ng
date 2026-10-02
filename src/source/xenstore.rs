@@ -2,8 +2,8 @@
 //! backs each VBD, each domain's VM UUID, and its balloon target.
 //!
 //! libxenstore is dlopen()ed like libxenstat; only its long-stable core
-//! (xs_open, xs_read, xs_close) is used. Per sample this costs one read per
-//! domain (`memory/target`) and one per VBD (`params`); the rest is cached
+//! (xs_open, xs_read, xs_close) is used. Per sample this costs two reads per
+//! domain (`vm`, `memory/target`) and one per VBD (`params`); the rest is cached
 //! and only re-read when `params` changes or a domain appears.
 //!
 //! xenstore paths used (backend nodes are written by the dom0 toolstack,
@@ -105,11 +105,36 @@ impl Drop for Xs {
 /// Fills in VM UUIDs, balloon targets and VBD backings on each sample.
 pub struct StorageMap {
     xs: Option<Xs>,
-    /// domid -> (name it had, VM UUID), so the `vm` node is read once.
-    vms: HashMap<u32, (String, Option<String>)>,
     /// (domid, dev) -> (params, backing): re-parsed only when params change.
     vbds: HashMap<(u32, u32), (String, Option<Backing>)>,
     kinds: SrKinds,
+    identities: VmIdentities,
+}
+
+/// Retain only successful UUID reads while the observed domain remains
+/// continuous. Always retry xenstore, including after a failed first read.
+#[derive(Default)]
+struct VmIdentities(HashMap<u32, (String, u64, String)>);
+
+impl VmIdentities {
+    fn resolve(&mut self, id: u32, name: &str, cpu_ns: u64, observed: Option<String>) -> Option<String> {
+        let uuid = observed.or_else(|| {
+            self.0
+                .get(&id)
+                .filter(|(n, cpu, _)| n == name && cpu_ns >= *cpu)
+                .map(|(_, _, uuid)| uuid.clone())
+        });
+        if let Some(uuid) = &uuid {
+            self.0.insert(id, (name.into(), cpu_ns, uuid.clone()));
+        } else {
+            self.0.remove(&id);
+        }
+        uuid
+    }
+    fn retain(&mut self, snap: &Snapshot) {
+        let present: HashSet<_> = snap.domains.iter().map(|d| d.id).collect();
+        self.0.retain(|id, _| present.contains(id));
+    }
 }
 
 /// SR UUID -> flavour, worked out once per SR.
@@ -127,14 +152,15 @@ impl StorageMap {
     pub fn open() -> Self {
         StorageMap {
             xs: Xs::open(),
-            vms: HashMap::new(),
             vbds: HashMap::new(),
             kinds: SrKinds::default(),
+            identities: VmIdentities::default(),
         }
     }
 
     /// Annotate `snap` and say how complete the mapping is.
     pub fn fill(&mut self, snap: &mut Snapshot) -> Avail {
+        self.identities.retain(snap);
         self.kinds.tick += 1;
         self.kinds.mounts = None;
         let Some(xs) = &self.xs else {
@@ -144,26 +170,19 @@ impl StorageMap {
         let mut reads = 0usize;
 
         // Forget domains and disks that are gone.
-        let doms: HashSet<u32> = snap.domains.iter().map(|d| d.id).collect();
         let disks: HashSet<(u32, u32)> = snap
             .domains
             .iter()
             .flat_map(|d| d.vbds.iter().map(|v| (d.id, v.dev)))
             .collect();
-        self.vms.retain(|id, _| doms.contains(id));
         self.vbds.retain(|k, _| disks.contains(k));
 
         for d in snap.domains.iter_mut().take(MAX_DOMS) {
             let base = format!("/local/domain/{}", d.id);
-            let cached = self.vms.get(&d.id).filter(|(name, _)| *name == d.name);
-            d.vm_uuid = match cached {
-                Some((_, u)) => u.clone(),
-                None => {
-                    let u = xs.read(&format!("{base}/vm")).and_then(|p| vm_uuid(&p));
-                    self.vms.insert(d.id, (d.name.clone(), u.clone()));
-                    u
-                }
-            };
+            // Read identity each time: domids are reusable, names are mutable,
+            // and a failed read at startup must not be cached forever.
+            let observed = xs.read(&format!("{base}/vm")).and_then(|p| vm_uuid(&p));
+            d.vm_uuid = self.identities.resolve(d.id, &d.name, d.cpu_ns, observed);
             d.mem_target = xs
                 .read(&format!("{base}/memory/target"))
                 .and_then(|s| parse_kib(&s));
@@ -178,29 +197,40 @@ impl StorageMap {
                     break;
                 }
                 let node = format!("/local/domain/0/backend/{dir}/{}/{}", d.id, v.dev);
-                let Some(params) = xs.read(&format!("{node}/params")) else {
-                    // Backend gone (device being unplugged).
-                    self.vbds.remove(&(d.id, v.dev));
-                    continue;
-                };
+                if v.error && backend_connecting(xs.read(&format!("{node}/state")).as_deref()) {
+                    // tapdisk creates its stats file only once the guest's
+                    // frontend connects (seconds into a boot): nothing to
+                    // read yet is not a failed read.
+                    v.error = false;
+                    v.connecting = true;
+                }
                 let key = (d.id, v.dev);
-                let backing = match self.vbds.get(&key) {
-                    Some((p, b)) if *p == params => b.clone(),
-                    _ => {
-                        let mut b = parse_params(&params);
-                        if b.sr.is_none() && b.vdi.is_none() && v.kind == VbdKind::Vbd3 {
-                            // Not a path we understand: SM also publishes
-                            // the VDI and its SR ("mem-pool") under sm-data.
-                            let sm = |k: &str| xs.read(&format!("{node}/sm-data/{k}")).and_then(|s| uuid(&s));
-                            b.vdi = sm("vdi-uuid");
-                            if b.vdi.is_some() {
-                                b.sr = sm("mem-pool");
+                let backing = match xs.read(&format!("{node}/params")) {
+                    // Transient failure, or the backend going away during an
+                    // unplug. Either way it is still the same device: keep
+                    // its last known backing so the failure doesn't look like
+                    // a disk replacement and reset its baseline. Departed
+                    // disks are forgotten above.
+                    None => self.vbds.get(&key).and_then(|(_, b)| b.clone()),
+                    Some(params) => match self.vbds.get(&key) {
+                        Some((p, b)) if *p == params => b.clone(),
+                        _ => {
+                            let mut b = parse_params(&params);
+                            if b.sr.is_none() && b.vdi.is_none() && v.kind == VbdKind::Vbd3 {
+                                // Not a path we understand: SM also publishes
+                                // the VDI and its SR ("mem-pool") under sm-data.
+                                let sm =
+                                    |k: &str| xs.read(&format!("{node}/sm-data/{k}")).and_then(|s| uuid(&s));
+                                b.vdi = sm("vdi-uuid");
+                                if b.vdi.is_some() {
+                                    b.sr = sm("mem-pool");
+                                }
                             }
+                            let b = (b != Backing::default()).then_some(b);
+                            self.vbds.insert(key, (params, b.clone()));
+                            b
                         }
-                        let b = (b != Backing::default()).then_some(b);
-                        self.vbds.insert(key, (params, b.clone()));
-                        b
-                    }
+                    },
                 };
                 v.backing = backing.map(|mut b| {
                     if b.sr_kind.is_none() {
@@ -216,6 +246,7 @@ impl StorageMap {
         match (total, mapped) {
             (0, _) => Avail::NotApplicable,
             (_, 0) => Avail::Missing,
+            _ if mapped < total => Avail::Partial,
             _ => Avail::Fallback,
         }
     }
@@ -441,6 +472,14 @@ fn kind_from_target(target: &str, sr: &str, mounts: &str) -> Option<String> {
     None
 }
 
+/// A backend not yet in XenbusStateConnected (4). Unreadable or unknown
+/// state is not evidence of connecting: the error stands.
+fn backend_connecting(state: Option<&str>) -> bool {
+    state
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .is_some_and(|s| s < 4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +493,70 @@ mod tests {
             vdi: Some(vdi.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn backend_state_before_connected_is_connecting() {
+        for s in ["1", "2", "3", " 3\n"] {
+            assert!(backend_connecting(Some(s)), "{s:?}");
+        }
+        // Connected, closing/closed, unknown or unreadable: keep the error.
+        for s in [Some("4"), Some("5"), Some("6"), Some("x"), Some(""), None] {
+            assert!(!backend_connecting(s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn cached_uuid_preserves_rates_until_a_different_uuid_is_observed() {
+        use crate::source::{
+            demo::{DemoConfig, DemoSource},
+            Source,
+        };
+        let mut ids = VmIdentities::default();
+        let mut a = DemoSource::new(&DemoConfig::default()).sample().unwrap();
+        a.domains.truncate(1);
+        let d = &mut a.domains[0];
+        d.vm_uuid = ids.resolve(d.id, &d.name, d.cpu_ns, Some("uuid-a".into()));
+        let mut b = a.clone();
+        b.at += std::time::Duration::from_secs(1);
+        let d = &mut b.domains[0];
+        d.cpu_ns += 100;
+        d.vm_uuid = ids.resolve(d.id, &d.name, d.cpu_ns, None);
+        assert!(!crate::model::compute(&a, &b).domains[0].baseline_reset);
+        let mut c = b.clone();
+        c.at += std::time::Duration::from_secs(1);
+        let d = &mut c.domains[0];
+        d.cpu_ns += 100;
+        d.vm_uuid = ids.resolve(d.id, &d.name, d.cpu_ns, Some("uuid-b".into()));
+        assert!(crate::model::compute(&b, &c).domains[0].baseline_reset);
+        c.domains.clear();
+        ids.retain(&c);
+        assert!(ids.0.is_empty(), "departed domains cannot leave cached UUIDs");
+    }
+
+    #[test]
+    fn transient_uuid_failures_keep_identity_but_replacements_do_not() {
+        let mut ids = VmIdentities::default();
+        let a = Some("uuid-a".to_string());
+        let b = Some("uuid-b".to_string());
+        assert_eq!(ids.resolve(5, "vm", 10, None), None);
+        assert_eq!(ids.resolve(5, "vm", 20, a.clone()), a);
+        assert_eq!(ids.resolve(5, "vm", 30, None), a);
+        assert_eq!(ids.resolve(5, "vm", 40, None), a);
+        assert_eq!(ids.resolve(5, "vm", 50, b.clone()), b);
+        assert_eq!(ids.resolve(5, "rename", 60, b.clone()), b);
+        assert_eq!(ids.resolve(5, "rename", 70, None), b);
+        assert_eq!(
+            ids.resolve(5, "rename", 1, None),
+            None,
+            "counter rollback invalidates cached identity"
+        );
+        ids.resolve(5, "rename", 10, a);
+        assert_eq!(
+            ids.resolve(5, "other", 20, None),
+            None,
+            "unverified rename is conservative"
+        );
     }
 
     #[test]

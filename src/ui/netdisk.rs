@@ -97,6 +97,17 @@ pub(super) fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
         vec![
             Span::styled(format!("{n}"), Style::new().fg(th.fg)),
             dim(th, what),
+            dim(
+                th,
+                if h.disk_samples.complete() {
+                    String::new()
+                } else {
+                    format!(
+                        "  {}/{} valid (*)",
+                        h.disk_samples.available, h.disk_samples.total
+                    )
+                },
+            ),
         ],
     );
     let inner = block.inner(area);
@@ -116,10 +127,14 @@ pub(super) fn disk_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     let lbl = |arrow: &str, v: f64, iops: f64, pk: f64, gr: &Gradient| {
         Line::from(vec![
             Span::styled(format!(" {arrow} "), Style::new().fg(gr.at(1.0))),
-            bold(format!("{}/s", fmt::rate(v)), gr.at(0.9)),
+            bold(format!("{}/s", h.disk_samples.label(fmt::rate(v))), gr.at(0.9)),
             dim(
                 th,
-                format!("  {} IOPS  peak {}/s ", fmt::count(iops), fmt::rate(pk)),
+                format!(
+                    "  {} IOPS  peak {}/s ",
+                    h.disk_samples.label(fmt::count(iops)),
+                    fmt::rate(pk)
+                ),
             ),
         ])
     };

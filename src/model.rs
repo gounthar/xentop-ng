@@ -159,6 +159,9 @@ pub struct VbdRaw {
     pub rd_sects: u64,
     pub wr_sects: u64,
     pub error: bool,
+    /// The backend has not connected yet (e.g. a booting guest), so there
+    /// are no stats to read: pending, not a collection failure.
+    pub connecting: bool,
     pub ext: Option<VbdExt>,
     /// What the disk is backed by, from xenstore; `None` when unknown.
     pub backing: Option<Backing>,
@@ -209,14 +212,50 @@ pub struct VbdExt {
 // ---------------------------------------------------------------------------
 // Rates
 
+/// Measurement coverage: sums include only the available devices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Coverage {
+    pub available: usize,
+    pub total: usize,
+    /// Newly observed, healthy devices still establishing a baseline.
+    pub pending: usize,
+}
+impl Coverage {
+    pub fn complete(self) -> bool {
+        self.available == self.total
+    }
+    pub fn has_value(self) -> bool {
+        self.available > 0 || (self.total == 0 && self.pending == 0)
+    }
+    fn record(&mut self, valid: bool, pending: bool) {
+        if pending {
+            self.pending += 1;
+        } else {
+            self.total += 1;
+            self.available += usize::from(valid);
+        }
+    }
+    pub fn label(self, value: String) -> String {
+        if !self.has_value() {
+            "-".into()
+        } else if !self.complete() {
+            format!("{value}*")
+        } else {
+            value
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct HostRates {
+    pub disk_samples: Coverage,
     pub hostname: String,
     pub xen_version: String,
     pub num_cpus: u32,
     pub cpu_mhz: u64,
     /// Per-pCPU busy fraction (0..1); empty when unavailable.
-    pub pcpu_busy: Vec<f64>,
+    pub pcpu_busy: Vec<Option<f64>>,
+    pub pcpu_samples: Coverage,
     /// Hypervisor CPU id for each entry of `pcpu_busy`.
     pub pcpu_ids: Vec<u32>,
     /// Whole-host busy fraction (0..1).
@@ -243,6 +282,9 @@ pub struct HostRates {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DomRates {
+    pub disk_samples: Coverage,
+    /// No compatible preceding domain sample; start history afresh.
+    pub baseline_reset: bool,
     pub id: u32,
     pub name: String,
     pub state: Option<DomState>,
@@ -295,6 +337,12 @@ impl DomRates {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct VbdRates {
+    /// Two successful, monotonic counter samples from this device.
+    pub stats_valid: bool,
+    /// A healthy new/replaced disk needs a baseline, not an error marker.
+    pub warming_up: bool,
+    /// Collection failure, distinct from a disk-reported I/O error.
+    pub collection_error: bool,
     pub dev: u32,
     pub name: String,
     pub kind: Option<VbdKind>,
@@ -314,6 +362,7 @@ pub struct VbdRates {
 /// VBD on it.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SrRates {
+    pub disk_samples: Coverage,
     /// SR UUID, or the backing directory when there is no SR.
     pub sr: String,
     /// SR name-label (xapi only).
@@ -465,6 +514,39 @@ pub fn vbd_name(dev: u32) -> String {
     format!("xvd{}", letters(index))
 }
 
+/// UUID is a Xen/xenstore identity, independent of XAPI. Counter rollback
+/// also invalidates a run, since a reboot can retain the VM's UUID.
+fn same_domain(prev: &DomainRaw, cur: &DomainRaw) -> bool {
+    let identity = match (&prev.vm_uuid, &cur.vm_uuid) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => prev.name == cur.name,
+        _ => false, // Metadata disappeared or became available: rebaseline.
+    };
+    identity && cur.cpu_ns >= prev.cpu_ns && cur.vcpus.iter().zip(&prev.vcpus).all(|(c, p)| c.ns >= p.ns)
+}
+
+fn same_backing(a: &Option<Backing>, b: &Option<Backing>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.sr == b.sr && a.vdi == b.vdi && a.path == b.path,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Never derive rates from failed reads or across counter resets.
+fn valid_vbd_pair(prev: &VbdRaw, cur: &VbdRaw) -> bool {
+    !prev.error
+        && !cur.error
+        && !prev.connecting
+        && !cur.connecting
+        && same_backing(&prev.backing, &cur.backing)
+        && cur.rd_reqs >= prev.rd_reqs
+        && cur.wr_reqs >= prev.wr_reqs
+        && cur.rd_sects >= prev.rd_sects
+        && cur.wr_sects >= prev.wr_sects
+        && cur.oo_reqs >= prev.oo_reqs
+}
+
 pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
     let dt = cur.at.duration_since(prev.at).as_secs_f64().max(1e-3);
     let dt_ns = dt * 1e9;
@@ -489,8 +571,9 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
 
     let mut domains = Vec::with_capacity(cur.domains.len());
     for dom in &cur.domains {
-        let p = prev_doms.get(&dom.id).filter(|p| p.name == dom.name);
+        let p = prev_doms.get(&dom.id).filter(|p| same_domain(p, dom));
         let mut r = DomRates {
+            baseline_reset: p.is_none(),
             id: dom.id,
             name: dom.name.clone(),
             state: Some(dom.state),
@@ -558,11 +641,11 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                 dev: v.dev,
                 name: vbd_name(v.dev),
                 kind: Some(v.kind),
-                errors: v
-                    .ext
-                    .map(|e| e.io_errors)
-                    .unwrap_or(0)
-                    .saturating_add(v.error as u64),
+                errors: v.ext.map(|e| e.io_errors).unwrap_or(0),
+                collection_error: v.error,
+                warming_up: !v.error
+                    && (v.connecting
+                        || pv.is_none_or(|pv| pv.connecting || !same_backing(&pv.backing, &v.backing))),
                 backing: v.backing.clone().unwrap_or_default(),
                 ..Default::default()
             };
@@ -571,23 +654,31 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             // No in-flight estimate: tapdisk counts empty flushes as
             // submitted writes but never as completed ones, so
             // submitted - completed drifts upward forever.
-            if let Some(pv) = pv {
+            if let Some(pv) = pv.filter(|pv| valid_vbd_pair(pv, v)) {
+                vr.stats_valid = true;
                 vr.rd_bps = d(v.rd_sects, pv.rd_sects) as f64 * 512.0 / dt;
                 vr.wr_bps = d(v.wr_sects, pv.wr_sects) as f64 * 512.0 / dt;
                 vr.rd_iops = d(v.rd_reqs, pv.rd_reqs) as f64 / dt;
                 vr.wr_iops = d(v.wr_reqs, pv.wr_reqs) as f64 / dt;
                 vr.oo_ps = d(v.oo_reqs, pv.oo_reqs) as f64 / dt;
                 if let (Some(e), Some(pe)) = (v.ext, pv.ext) {
-                    (ru, wu) = (d(e.rd_usecs, pe.rd_usecs), d(e.wr_usecs, pe.wr_usecs));
-                    (rn, wn) = (d(e.rd_done, pe.rd_done), d(e.wr_done, pe.wr_done));
-                    vr.rd_lat_us = lat(ru, rn);
-                    vr.wr_lat_us = lat(wu, wn);
-                    rd_us = rd_us.saturating_add(ru);
-                    wr_us = wr_us.saturating_add(wu);
-                    rd_done = rd_done.saturating_add(rn);
-                    wr_done = wr_done.saturating_add(wn);
+                    if e.rd_done >= pe.rd_done
+                        && e.wr_done >= pe.wr_done
+                        && e.rd_usecs >= pe.rd_usecs
+                        && e.wr_usecs >= pe.wr_usecs
+                    {
+                        (ru, wu) = (d(e.rd_usecs, pe.rd_usecs), d(e.wr_usecs, pe.wr_usecs));
+                        (rn, wn) = (d(e.rd_done, pe.rd_done), d(e.wr_done, pe.wr_done));
+                        vr.rd_lat_us = lat(ru, rn);
+                        vr.wr_lat_us = lat(wu, wn);
+                        rd_us = rd_us.saturating_add(ru);
+                        wr_us = wr_us.saturating_add(wu);
+                        rd_done = rd_done.saturating_add(rn);
+                        wr_done = wr_done.saturating_add(wn);
+                    }
                 }
             }
+            r.disk_samples.record(vr.stats_valid, vr.warming_up);
             r.disk_rd_bps += vr.rd_bps;
             r.disk_wr_bps += vr.wr_bps;
             r.disk_rd_iops += vr.rd_iops;
@@ -597,6 +688,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             if let Some(key) = vr.backing.group() {
                 let a = srs.entry(key).or_default();
                 a.r.vbds += 1;
+                a.r.disk_samples.record(vr.stats_valid, vr.warming_up);
                 if a.r.kind.is_none() {
                     a.r.kind = vr.backing.sr_kind.clone();
                 }
@@ -620,6 +712,9 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
 
         host.net_rx_bps += r.net_rx_bps;
         host.net_tx_bps += r.net_tx_bps;
+        host.disk_samples.total += r.disk_samples.total;
+        host.disk_samples.pending += r.disk_samples.pending;
+        host.disk_samples.available += r.disk_samples.available;
         host.disk_rd_bps += r.disk_rd_bps;
         host.disk_wr_bps += r.disk_wr_bps;
         host.disk_rd_iops += r.disk_rd_iops;
@@ -644,12 +739,25 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
         (Some(pi), Some(ci)) if !ci.is_empty() => {
             let prev_idle: HashMap<u32, u64> = pi.iter().copied().collect();
             for &(id, c) in ci {
-                let p = prev_idle.get(&id).copied().unwrap_or(c);
+                let busy = prev_idle
+                    .get(&id)
+                    .and_then(|&p| c.checked_sub(p))
+                    .map(|idle| (1.0 - idle as f64 / dt_ns).clamp(0.0, 1.0));
                 host.pcpu_ids.push(id);
-                host.pcpu_busy
-                    .push((1.0 - d(c, p) as f64 / dt_ns).clamp(0.0, 1.0));
+                host.pcpu_busy.push(busy);
             }
-            host.cpu_busy = host.pcpu_busy.iter().sum::<f64>() / host.pcpu_busy.len() as f64;
+            host.pcpu_samples = Coverage {
+                pending: 0,
+                total: host.pcpu_busy.len(),
+                available: host.pcpu_busy.iter().flatten().count(),
+            };
+            if host.pcpu_samples.available > 0 {
+                host.cpu_busy =
+                    host.pcpu_busy.iter().flatten().sum::<f64>() / host.pcpu_samples.available as f64;
+            } else {
+                host.cpu_estimated = true;
+                host.cpu_busy = (dom_cpu_total / cur.num_cpus.max(1) as f64).clamp(0.0, 1.0);
+            }
         }
         _ => {
             host.cpu_estimated = true;
@@ -744,6 +852,7 @@ mod rate_tests {
                 rd_sects: 0,
                 wr_sects: 0,
                 error: false,
+                connecting: false,
                 ext: None,
                 backing: None,
             }],
@@ -767,6 +876,109 @@ mod rate_tests {
     }
 
     #[test]
+    fn failed_disk_read_requires_a_new_baseline() {
+        let t = Instant::now();
+        let good = snap(t, vec![dom(5, "vm", 0, 1_000_000)]);
+        let mut failed = snap(t + Duration::from_secs(1), vec![dom(5, "vm", 0, 0)]);
+        failed.domains[0].vbds[0].error = true;
+        let recovered = snap(t + Duration::from_secs(2), vec![dom(5, "vm", 0, 1_000_010)]);
+        let next = snap(t + Duration::from_secs(3), vec![dom(5, "vm", 0, 1_000_020)]);
+        for (a, b) in [(&good, &failed), (&failed, &recovered)] {
+            let r = compute(a, b);
+            assert!(!r.domains[0].vbds[0].stats_valid);
+            assert_eq!(r.host.disk_rd_iops, 0.0);
+            assert_eq!(r.domains[0].disk_errors, 0);
+        }
+        let r = compute(&recovered, &next);
+        assert!(r.domains[0].vbds[0].stats_valid);
+        assert_eq!(r.host.disk_rd_iops, 10.0);
+    }
+
+    #[test]
+    fn booting_disk_is_pending_until_it_has_a_baseline() {
+        let t = Instant::now();
+        let mut connecting = snap(t, vec![dom(9, "vm", 0, 0)]);
+        connecting.domains[0].vbds[0].connecting = true;
+        let mut later = connecting.clone();
+        later.at += Duration::from_secs(1);
+        let first = snap(t + Duration::from_secs(2), vec![dom(9, "vm", 0, 5_000)]);
+        let next = snap(t + Duration::from_secs(3), vec![dom(9, "vm", 0, 5_010)]);
+        for (a, b) in [(&connecting, &later), (&later, &first)] {
+            let r = compute(a, b);
+            let v = &r.domains[0].vbds[0];
+            assert!(v.warming_up && !v.stats_valid && !v.collection_error);
+            assert!(r.host.disk_samples.complete(), "not partial data");
+            assert_eq!(r.host.disk_rd_iops, 0.0, "no spike from a zero baseline");
+        }
+        let r = compute(&first, &next);
+        assert!(r.domains[0].vbds[0].stats_valid);
+        assert_eq!(r.host.disk_rd_iops, 10.0);
+    }
+
+    #[test]
+    fn hotplug_is_pending_and_partial_graphs_keep_valid_sums() {
+        let t = Instant::now();
+        let mut old = dom(5, "vm", 100, 100);
+        old.vbds[0].rd_sects = 800;
+        old.vbds[0].backing = Some(Backing {
+            sr: Some("sr".into()),
+            ..Default::default()
+        });
+        let mut cur = old.clone();
+        cur.vbds[0].rd_reqs += 10;
+        cur.vbds[0].rd_sects += 80;
+        let mut extra = cur.vbds[0].clone();
+        extra.dev += 16;
+        cur.vbds.push(extra);
+        let a = snap(t, vec![old]);
+        let b = snap(t + Duration::from_secs(1), vec![cur]);
+        let r = compute(&a, &b);
+        assert!(r.domains[0].vbds[1].warming_up);
+        assert_eq!(
+            r.host.disk_samples,
+            Coverage {
+                available: 1,
+                total: 1,
+                pending: 1
+            }
+        );
+        assert!(r.host.disk_samples.complete());
+        assert_eq!(r.host.disk_samples.label("10".into()), "10");
+        let mut failed = b.clone();
+        failed.domains[0].vbds[1].error = true;
+        let r = compute(&a, &failed);
+        assert_eq!(
+            r.host.disk_samples,
+            Coverage {
+                available: 1,
+                total: 2,
+                pending: 0
+            }
+        );
+        assert_eq!(r.host.disk_samples.label("10".into()), "10*");
+        let mut h = crate::history::History::default();
+        h.record(&r);
+        assert_eq!(h.rd.tail(1), vec![40960.0]);
+        assert_eq!(h.riops.tail(1), vec![10.0]);
+        assert_eq!(h.doms[&5].rd.tail(1), vec![40960.0]);
+        assert_eq!(h.srs["sr"].iops.back(), Some(&10.0));
+        failed.domains[0].vbds[0].error = true;
+        let r = compute(&a, &failed);
+        h.record(&r);
+        assert!(h.rd.tail(1)[0].is_nan());
+        assert!(h.doms[&5].rd.tail(1)[0].is_nan());
+        assert!(h.srs["sr"].iops.back().unwrap().is_nan());
+        let pending = Coverage {
+            available: 0,
+            total: 0,
+            pending: 1,
+        };
+        assert!(!pending.has_value());
+        assert_eq!(pending.label("0".into()), "-");
+        assert!(Coverage::default().has_value(), "no disks is idle, not missing");
+    }
+
+    #[test]
     fn reused_domid_starts_fresh() {
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_secs(1);
@@ -776,6 +988,80 @@ mod rate_tests {
         );
         // No previous sample for "new": no bogus 400% spike.
         assert_eq!(r.domains[0].cpu_pct, 0.0);
+    }
+
+    #[test]
+    fn pcpu_hotplug_and_resets_have_no_invented_utilization() {
+        let t = Instant::now();
+        let mut a = snap(t, vec![]);
+        let mut b = snap(t + Duration::from_secs(1), vec![]);
+        a.pcpu_idle_ns = Some(vec![(0, 1_000_000_000), (2, 2_000_000_000)]);
+        b.pcpu_idle_ns = Some(vec![(0, 2_000_000_000), (3, 3_000_000_000)]);
+        let r = compute(&a, &b);
+        assert_eq!(r.host.pcpu_ids, vec![0, 3]);
+        assert_eq!(r.host.pcpu_busy, vec![Some(0.0), None]);
+        assert_eq!(r.host.cpu_busy, 0.0);
+        assert_eq!(
+            r.host.pcpu_samples,
+            Coverage {
+                pending: 0,
+                available: 1,
+                total: 2
+            }
+        );
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json["host"]["pcpu_busy"][1].is_null());
+        b.pcpu_idle_ns = Some(vec![(0, 1), (2, 1)]);
+        let r = compute(&a, &b);
+        assert_eq!(r.host.pcpu_busy, vec![None, None]);
+        assert!(r.host.cpu_estimated);
+    }
+
+    #[test]
+    fn identity_without_xapi_and_rename() {
+        let t = Instant::now();
+        let mut a = snap(t, vec![dom(5, "old name", 100, 100)]);
+        let mut b = snap(t + Duration::from_secs(1), vec![dom(5, "renamed", 200, 110)]);
+        a.domains[0].vm_uuid = Some("uuid-a".into());
+        b.domains[0].vm_uuid = Some("uuid-a".into());
+        let r = compute(&a, &b);
+        assert!(!r.domains[0].baseline_reset);
+        assert_eq!(r.domains[0].disk_rd_iops, 10.0);
+        let mut history = crate::history::History::default();
+        history.record(&r);
+        let mut renamed = r.clone();
+        renamed.domains[0].name = "renamed again".into();
+        history.record(&renamed);
+        assert_eq!(history.doms[&5].cpu.tail(10).len(), 2);
+        b.domains[0].name = a.domains[0].name.clone();
+        b.domains[0].vm_uuid = Some("uuid-b".into());
+        let r = compute(&a, &b);
+        assert!(r.domains[0].baseline_reset);
+        assert_eq!(r.domains[0].disk_rd_iops, 0.0);
+        history.record(&r);
+        assert_eq!(history.doms[&5].cpu.tail(10).len(), 1);
+        b.domains[0].vm_uuid = Some("uuid-a".into());
+        b.domains[0].cpu_ns = 1;
+        assert!(compute(&a, &b).domains[0].baseline_reset);
+        a.domains[0].vm_uuid = None;
+        b.domains[0].vm_uuid = None;
+        assert!(compute(&a, &b).domains[0].baseline_reset);
+    }
+
+    #[test]
+    fn disk_replacement_at_same_slot_starts_fresh() {
+        let t = Instant::now();
+        let mut a = snap(t, vec![dom(5, "vm", 100, 100)]);
+        let mut b = snap(t + Duration::from_secs(1), vec![dom(5, "vm", 200, 500)]);
+        a.domains[0].vbds[0].backing = Some(Backing {
+            path: Some("/old".into()),
+            ..Default::default()
+        });
+        b.domains[0].vbds[0].backing = Some(Backing {
+            path: Some("/new".into()),
+            ..Default::default()
+        });
+        assert!(!compute(&a, &b).domains[0].vbds[0].stats_valid);
     }
 
     /// A VBD on `sr` that did `reqs` reads taking `us` µs in all, plus the
@@ -790,6 +1076,7 @@ mod rate_tests {
             rd_sects: reqs * 8,
             wr_sects: 0,
             error: false,
+            connecting: false,
             ext: Some(VbdExt {
                 rd_done: reqs,
                 wr_done: reqs,
@@ -1040,6 +1327,7 @@ mod overflow_tests {
             rd_sects: u64::MAX,
             wr_sects: u64::MAX,
             error: true,
+            connecting: false,
             ext: Some(VbdExt {
                 rd_done: u64::MAX,
                 wr_done: u64::MAX,

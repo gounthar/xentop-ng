@@ -34,6 +34,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: python3 tests/libxenstat/check-reader.py
       - run: cargo test --locked
       - run: cargo build --release --locked
       - name: Smoke test (demo, batch mode)

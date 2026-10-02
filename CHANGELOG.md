@@ -3,6 +3,60 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
+## [0.5.0] - 2026-10-02
+
+Numbers you can trust: xentop-ng no longer shows a spike, a zero or a
+complete-looking total when it didn't actually measure one.
+
+### Changed
+
+- `--batch` JSON: `host.pcpu_busy` entries can be `null` (a core without
+  a baseline yet), and a source in `"sources"` can be `partial`. New
+  fields say how complete each figure is: `disk_samples` (host, domain,
+  SR) and `host.pcpu_samples` count devices with a valid interval
+  (`available` of `total`, plus `pending` new disks);
+  `sources.vbd_latency_coverage` and `sources.steal_coverage` do the same
+  for latency and steal. VBDs gain `stats_valid`, `warming_up` and
+  `collection_error`; domains gain `baseline_reset`. See
+  [Batch mode](https://github.com/olivierlambert/xentop-ng/blob/v0.5.0/README.md#batch-mode).
+- Totals missing some disks or pCPUs are marked `*` and raise the header's
+  ◐ marker; with none they show `-`. History graphs show a dotted gap for
+  a missing sample instead of drawing it as idle, and keep the sum of the
+  disks that were measured.
+- Steal time available for only some domains now raises the ◐ marker
+  (missing steal still doesn't: that depends on the hypervisor).
+
+### Fixed
+
+- A hung hypervisor or xenstore call froze the whole interface. Sampling
+  now runs on its own thread: keys keep working, the header shows how
+  stale the data is, and `q` quits at once.
+- When xentop-ng can't start (no Xen, missing library), it prints why and
+  exits before taking over the terminal.
+- A rebooted VM, or another VM reusing its domain ID, could inherit the
+  old one's history, or show a CPU or disk spike computed across the two.
+  VMs are now recognised by their xenstore UUID (no xapi needed), so a
+  rename keeps the history and a different VM starts afresh.
+- Disk rates spanning a failed read, a counter reset or a swapped VDI
+  could show huge or bogus values; that interval is now skipped. A disk
+  read failure shows as `read!` in the details instead of being added to
+  the disk's I/O error count.
+- Booting a VM no longer flags its disks as failing for the ~15 s before
+  the guest's PV driver connects; they wait for a baseline like a new disk.
+- A pCPU going offline or online could wipe or mix up the cores' history
+  graphs, and showed a newly online core at 100%.
+- An unreadable `/proc/net/dev` was reported as "no VIFs" instead of
+  missing data.
+
+### Security
+
+- New libxenstat patch [0005](https://github.com/olivierlambert/xentop-ng/blob/v0.5.0/libxenstat/README.md#0005-safe-tapdisk-stats-reads):
+  libxenstat reads tapdisk's stats from world-writable `/dev/shm` with a
+  plain `fopen()`, so a symlink, FIFO or crafted file there could hang or
+  mislead a root monitor. The patch only accepts root-owned, non-writable,
+  regular files with a valid record. xentop-ng's own fallback already did;
+  this protects libxenstat itself, so apply it if you replace libxenstat.
+
 ## [0.4.1] - 2026-10-02
 
 ### Fixed
@@ -135,6 +189,7 @@ First public release: same as 0.1.0, with build provenance attestations.
 Initial release: a btop-style Xen monitor with fallbacks for what stock
 libxenstat lacks, security hardening, CI and signed release builds.
 
+[0.5.0]: https://github.com/olivierlambert/xentop-ng/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/olivierlambert/xentop-ng/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/olivierlambert/xentop-ng/compare/v0.3.1...v0.3.2

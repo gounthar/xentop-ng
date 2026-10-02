@@ -2,6 +2,7 @@ pub mod demo;
 mod dl;
 pub mod fallback;
 mod gaps;
+pub mod worker;
 pub mod xapi;
 pub mod xenstat;
 pub mod xenstore;
@@ -21,6 +22,8 @@ pub enum Avail {
     Missing,
     /// Nothing to report on this host (e.g. no tapdisk3 disks).
     NotApplicable,
+    /// Only some eligible entities have measurements.
+    Partial,
 }
 
 /// Whether names come from xapi (XCP-ng/XenServer toolstack).
@@ -40,6 +43,8 @@ pub enum XapiState {
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct DataStatus {
+    pub vbd_latency_coverage: crate::model::Coverage,
+    pub steal_coverage: crate::model::Coverage,
     pub pcpu: Avail,
     pub vbd_latency: Avail,
     pub vifs: Avail,
@@ -47,8 +52,8 @@ pub struct DataStatus {
     /// never has these: `Fallback` means read from xenstore.
     pub storage: Avail,
     /// Steal time (vCPUs runnable but not running). Needs a hypervisor
-    /// patch, not just libxenstat, so it is left out of the header's
-    /// partial/fallback marker; the `i` popup still shows it.
+    /// patch for full support. Missing steal is normal on unsupported
+    /// hypervisors; partial coverage still marks incomplete measurements.
     pub steal: Avail,
     /// SR/VDI/network names. Extra, never a gap: not part of `degraded`.
     pub xapi: XapiState,
@@ -56,12 +61,29 @@ pub struct DataStatus {
 
 impl DataStatus {
     pub fn degraded(&self) -> bool {
-        [self.pcpu, self.vbd_latency, self.vifs, self.storage].contains(&Avail::Missing)
+        // Missing steal can mean the hypervisor does not support it. Partial
+        // steal means a supported measurement is incomplete and merits a warning.
+        [self.pcpu, self.vbd_latency, self.vifs, self.storage]
+            .iter()
+            .any(|a| matches!(a, Avail::Missing | Avail::Partial))
+            || self.steal == Avail::Partial
     }
     /// Storage mapping always comes from xenstore, so it doesn't count:
     /// this flags gaps in libxenstat only.
     pub fn uses_fallback(&self) -> bool {
         [self.pcpu, self.vbd_latency, self.vifs].contains(&Avail::Fallback)
+    }
+}
+
+pub fn coverage_status(c: crate::model::Coverage, origin: Avail) -> Avail {
+    if c.total == 0 {
+        Avail::NotApplicable
+    } else if c.available == 0 {
+        Avail::Missing
+    } else if !c.complete() {
+        Avail::Partial
+    } else {
+        origin
     }
 }
 

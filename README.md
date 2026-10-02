@@ -26,6 +26,14 @@ per disk and per network interface.
 - **Network and disk**: throughput graphs for traffic to/from VMs and for
   reads/writes, with IOPS and peaks.
 - **Disk latency**: read/write service time from tapdisk3, with history.
+- **Numbers you can trust**: a VM reboot, a disk swap or a counter reset
+  starts that figure afresh instead of producing a bogus spike. Totals
+  missing some devices are marked `*`, unknown values show `-`, and gaps in
+  history are dotted rather than drawn as idle
+  ([details](#when-vms-and-disks-change)).
+- **Stays responsive**: sampling runs on its own thread, so a hung
+  hypervisor or xenstore call never freezes the keyboard; the header says
+  how stale the data is.
 - **Steal time**: how long vCPUs were ready to run but waited for a pCPU,
   the most direct sign of an overcommitted host. Per domain on stock XCP-ng;
   per vCPU [with a hypervisor patch](#steal-time-needs-a-hypervisor-patch).
@@ -169,10 +177,11 @@ first block in tables, in full in the details) or backing paths.
 `--no-xapi` turns it off.
 
 When per-pCPU load, disk latency or VIFs come from a fallback or are
-missing, the header shows a discreet **◐** marker. Storage mapping and steal
-time don't count: the first always comes from xenstore, the second depends
-on the hypervisor. Press **`i`** for the data sources panel,
-which says where each metric comes from. `--batch` output includes the same
+missing, the header shows a discreet **◐** marker. Missing storage mapping
+and partial measurement coverage also mark degraded data. Xenstore mapping
+is not a fallback warning, and missing steal time is normal on unsupported
+hypervisors; partial steal coverage does warn. Press **`i`** for the data sources
+panel, which says where each metric comes from. `--batch` output includes the same
 information under `"sources"`.
 
 Disks are named the way the guest sees them with PV drivers: HVM disks
@@ -203,8 +212,9 @@ per-domain figure on XCP-ng.
   vCPU that reports it.
 
 The data sources panel (`i`) and `--batch` (`"sources"`) say where the
-figure comes from. Steal isn't counted in the header's ◐ marker, since it
-depends on the hypervisor rather than on libxenstat.
+figure comes from. Missing steal time doesn't raise the header's ◐ marker,
+since it depends on the hypervisor rather than on libxenstat; steal
+available for only some domains does.
 
 ### Building for XCP-ng 8.3 yourself
 
@@ -261,7 +271,9 @@ wrong, and the `"sources"` part of `xentop-ng --batch -n 1`.
   pass for the real one.
 - **Fallback files:** stats files in world-writable `/dev/shm` are only
   trusted if they and their directory are root-owned, opened without
-  following symlinks, and belong to a live tapdisk.
+  following symlinks, and belong to a live tapdisk. Stock libxenstat reads
+  the same files with a plain `fopen()`; [patch 0005](libxenstat/README.md#0005-safe-tapdisk-stats-reads)
+  gives it the same checks, so apply it if you replace libxenstat.
 - **xapi names** (SRs, VDIs, networks) are bounded and sanitised like
   VM names. Only read-only API calls are made.
 - **xenstore values** (backing paths, VM paths) are length-bounded and
@@ -274,6 +286,43 @@ wrong, and the `"sources"` part of `xentop-ng --batch -n 1`.
   anyway, `--lib` only accepts root-owned files in root-owned directories.
 
 Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
+### When VMs and disks change
+
+Rates are the difference between two samples, so xentop-ng first checks
+that both samples measure the same thing:
+
+- **VMs** are recognised by their UUID, read from xenstore (xapi isn't
+  needed). A renamed VM keeps its history. A rebooted VM gets a new domain
+  ID and starts afresh, and so does a domain ID that Xen reuses for another
+  VM, or a VM whose CPU counter goes backwards. A brief xenstore read
+  failure keeps the last known UUID. With no UUID at all, the domain ID and
+  name are used.
+- **Disks** start afresh when their backing changes (another VDI in the
+  same slot), their counters go backwards, or a read fails. A new or
+  hot-plugged disk shows `-` until it has two samples. While a booting
+  guest's PV driver hasn't connected yet, its disks are waiting, not
+  failing, so a VM boot doesn't raise the ◐ marker.
+- **Physical CPUs** are tracked by ID, so CPU hotplug can't hand one core's
+  history to another. A core that comes online shows `-` until it has a
+  baseline.
+- **Partial data:** when only some disks or pCPUs have a valid interval,
+  totals add up the valid ones and are marked `*`, and the header shows ◐;
+  when none do, they show `-`. Graphs leave a dotted gap for missing
+  samples instead of drawing them as zero. A disk that can't be read shows
+  `read!` in the domain details, apart from the I/O errors the disk itself
+  reports.
+
+One case can't be detected: a VM that restarts entirely between two
+samples and comes back with the same domain ID, name and UUID, and counters
+higher than before.
+
+Sampling runs on its own thread, including loading the Xen libraries, and
+only one sample is in flight at a time. If a hypervisor or xenstore call
+hangs, the keyboard still works, the header shows ` stale Ns`, and `q`
+quits without waiting. If xentop-ng can't start (no Xen, missing library),
+it prints why and exits before taking over the terminal. Batch modes sample
+in line, as before.
 
 ## Keys
 
@@ -386,6 +435,19 @@ latency, per VBD and per VIF. This is handy next to a benchmark run.
 panel). Domains carry `vm_uuid` and `mem_target`
 (bytes), VBDs `sr`, `vdi`, `sr_kind` and `path`, and `srs` holds the per-SR
 totals (full UUIDs, latency, top VM by IOPS). Unknown values are `null`.
+
+Some fields say how complete each figure is
+(see [When VMs and disks change](#when-vms-and-disks-change)):
+
+- `sources`: each class of data is `lib`, `fallback`, `partial`, `missing`
+  or `not_applicable`; `vbd_latency_coverage` and `steal_coverage` count
+  the disks and domains that report it.
+- `disk_samples` (host, domain, SR) and `host.pcpu_samples`: `available`
+  devices with a valid interval out of `total`; `pending` counts new disks
+  and disks still connecting, which aren't expected to have one yet.
+- Per VBD, `stats_valid`, `warming_up` and `collection_error` say why a
+  rate is missing; per domain, `baseline_reset` marks a fresh start.
+- `host.pcpu_busy` entries are `null` for a core without a baseline.
 
 For xentop's text format instead, see
 [Drop-in replacement for xentop](#drop-in-replacement-for-xentop).

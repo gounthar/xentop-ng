@@ -657,6 +657,7 @@ impl DemoSource {
                             rd_sects: 0,
                             wr_sects: 0,
                             error: false,
+                            connecting: false,
                             ext: None,
                             backing: Some(backing),
                         },
@@ -863,6 +864,8 @@ impl Source for DemoSource {
             storage: Avail::Fallback,
             steal: m,
             xapi: XapiState::Connected,
+            vbd_latency_coverage: super::gaps::latency_coverage(&self.snapshot(self.last)),
+            steal_coverage: super::gaps::steal_coverage(&self.snapshot(self.last)),
         }
     }
 

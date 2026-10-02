@@ -1,0 +1,153 @@
+Subject: [PATCH] tools/libxenstat: validate tapdisk stats before reading
+
+The stats live in world-writable /dev/shm. Reject non-numeric PIDs,
+symlinks, writable or non-root-owned directories/files, hard links and
+non-regular files. Use nonblocking descriptor-relative opens so FIFOs
+cannot hang a root monitor. Validate the whole record before publishing
+any counters. No public ABI change.
+
+---
+diff --git a/tools/libs/stat/xenstat_linux.c b/tools/libs/stat/xenstat_linux.c
+--- a/tools/libs/stat/xenstat_linux.c
++++ b/tools/libs/stat/xenstat_linux.c
+@@ -22,6 +22,8 @@
+ 
+ #define _GNU_SOURCE
+ #include <fcntl.h>
++#include <errno.h>
++#include <limits.h>
+ #include <dirent.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -392,44 +394,78 @@
+ 		fclose(priv->procnetdev);
+ }
+ 
+-static int read_attributes_vbd3(const char *vbd3_path, xenstat_vbd *vbd)
+-{
+-	FILE *fp;
+-	struct vbd3_stats vbd3_stats;
+-
+-	fp = fopen(vbd3_path, "rb");
+-
+-	if (fp == NULL) {
++/* Open each untrusted component relative to its verified parent. */
++static int trusted_stats_fd(int fd, int directory)
++{
++	struct stat st;
++	if (fstat(fd, &st) < 0 || st.st_uid != 0 || (st.st_mode & 0022))
++		return 0;
++	if (directory)
++		return S_ISDIR(st.st_mode);
++	return S_ISREG(st.st_mode) && st.st_nlink == 1 &&
++	       st.st_size >= (off_t)sizeof(struct vbd3_stats) && st.st_size <= 65536;
++}
++
++static int read_attributes_vbd3(const char *pid, unsigned int domid,
++                              unsigned int dev, xenstat_vbd *vbd)
++{
++	int shm = -1, dir = -1, fd = -1, ret = -1;
++	const int flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC;
++	char name[80];
++	const char *p;
++	unsigned long nr;
++	size_t done = 0;
++	struct vbd3_stats stats;
++
++	if (!pid || !*pid)
+ 		return -1;
+-	}
+-
+-	if (fread(&vbd3_stats, sizeof(struct vbd3_stats), 1, fp) != 1) {
+-		fclose(fp);
++	for (p = pid; *p; p++)
++		if (*p < '0' || *p > '9')
++			return -1;
++	errno = 0;
++	nr = strtoul(pid, NULL, 10);
++	if (errno || !nr || nr > INT_MAX)
+ 		return -1;
+-	}
+-
+-	if (vbd3_stats.version != 1) {
+-		fclose(fp);
+-		return -1;
+-	}
+-
+-	vbd->oo_reqs = vbd3_stats.oo_reqs;
+-	vbd->rd_reqs = vbd3_stats.read_reqs_submitted;
+-	vbd->rd_sects = vbd3_stats.read_sectors;
+-	vbd->wr_reqs = vbd3_stats.write_reqs_submitted;
+-	vbd->wr_sects = vbd3_stats.write_sectors;
+-
+-	/* tapdisk accumulates *_total_ticks in microseconds */
+-	vbd->rd_reqs_done = vbd3_stats.read_reqs_completed;
+-	vbd->wr_reqs_done = vbd3_stats.write_reqs_completed;
+-	vbd->rd_usecs = vbd3_stats.read_total_ticks;
+-	vbd->wr_usecs = vbd3_stats.write_total_ticks;
+-	vbd->io_errors = vbd3_stats.io_errors;
++
++	shm = open("/dev/shm", flags | O_DIRECTORY);
++	if (shm < 0)
++		goto out;
++	snprintf(name, sizeof(name), "td3-%lu", nr);
++	dir = openat(shm, name, flags | O_DIRECTORY);
++	if (dir < 0 || !trusted_stats_fd(dir, 1))
++		goto out;
++	snprintf(name, sizeof(name), "vbd-%u-%u", domid, dev);
++	fd = openat(dir, name, flags);
++	if (fd < 0 || !trusted_stats_fd(fd, 0))
++		goto out;
++	while (done < sizeof(stats)) {
++		ssize_t n = read(fd, (char *)&stats + done, sizeof(stats) - done);
++		if (n < 0 && errno == EINTR)
++			continue;
++		if (n <= 0)
++			goto out;
++		done += n;
++	}
++	if (stats.version != 1)
++		goto out;
++
++	vbd->oo_reqs = stats.oo_reqs;
++	vbd->rd_reqs = stats.read_reqs_submitted;
++	vbd->rd_sects = stats.read_sectors;
++	vbd->wr_reqs = stats.write_reqs_submitted;
++	vbd->wr_sects = stats.write_sectors;
++	vbd->rd_reqs_done = stats.read_reqs_completed;
++	vbd->wr_reqs_done = stats.write_reqs_completed;
++	vbd->rd_usecs = stats.read_total_ticks;
++	vbd->wr_usecs = stats.write_total_ticks;
++	vbd->io_errors = stats.io_errors;
+ 	vbd->has_ext = 1;
+-
+-	fclose(fp);
+-
+-	return 0;
++	ret = 0;
++out:
++	if (fd >= 0) close(fd);
++	if (dir >= 0) close(dir);
++	if (shm >= 0) close(shm);
++	return ret;
+ }
+ 
+ static int read_attributes_vbd(const char *vbd_directory, const char *what, char *ret, int cap)
+@@ -542,16 +578,10 @@
+ 			if (td3_pid == NULL)
+ 				continue;
+ 
+-			if (asprintf(&path, "/dev/shm/td3-%s/vbd-%u-%u", td3_pid, domid, vbd.dev) < 0) {
+-				free(td3_pid);
+-				continue;
+-			}
+-
+-			if (read_attributes_vbd3(path, &vbd) < 0)
++			if (read_attributes_vbd3(td3_pid, domid, vbd.dev, &vbd) < 0)
+ 				vbd.error = 1;
+ 
+ 			free(td3_pid);
+-			free(path);
+ 		}
+ 		else
+ 		{

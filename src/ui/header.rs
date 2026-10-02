@@ -39,7 +39,12 @@ pub(super) fn header(buf: &mut Buffer, app: &App, area: Rect) {
     // Subtle hint when some data is missing or rebuilt by fallbacks
     // (libxenstat patches not upstream yet). Details behind `i`.
     let mut left = left;
-    if app.status.degraded() {
+    if app.status.degraded()
+        || app
+            .rates
+            .as_ref()
+            .is_some_and(|r| !r.host.disk_samples.complete())
+    {
         left.push_span(Span::styled("  ◐ partial data", Style::new().fg(th.warn)));
         left.push_span(dim(th, " (i)"));
     } else if app.status.uses_fallback() {
@@ -62,6 +67,12 @@ pub(super) fn header(buf: &mut Buffer, app: &App, area: Rect) {
         right.push(Span::styled(
             format!(" {} ", fmt::trunc(e, 50)),
             Style::new().fg(th.bad),
+        ));
+    }
+    if !app.paused && app.sample_age() > (app.interval * 2).max(std::time::Duration::from_secs(2)) {
+        right.push(Span::styled(
+            format!(" stale {:.0}s ", app.sample_age().as_secs_f64()),
+            Style::new().fg(th.warn),
         ));
     }
     if app.paused {

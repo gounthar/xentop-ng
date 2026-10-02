@@ -249,19 +249,47 @@ pub(super) fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) 
                 Span::styled(format!("{:<6}", v.name), Style::new().fg(th.fg)),
                 dim(th, format!("{:<9}", v.kind.map(|k| k.label()).unwrap_or("?"))),
                 Span::styled(
-                    format!("{:>7}", fmt::count(v.rd_iops)),
+                    format!(
+                        "{:>7}",
+                        if v.stats_valid {
+                            fmt::count(v.rd_iops)
+                        } else {
+                            "-".into()
+                        }
+                    ),
                     Style::new().fg(th.rd.at(1.0))
                 ),
                 Span::styled(
-                    format!("{:>7}", fmt::count(v.wr_iops)),
+                    format!(
+                        "{:>7}",
+                        if v.stats_valid {
+                            fmt::count(v.wr_iops)
+                        } else {
+                            "-".into()
+                        }
+                    ),
                     Style::new().fg(th.wr.at(1.0))
                 ),
                 Span::styled(
-                    format!("{:>8}", fmt::rate(v.rd_bps)),
+                    format!(
+                        "{:>8}",
+                        if v.stats_valid {
+                            fmt::rate(v.rd_bps)
+                        } else {
+                            "-".into()
+                        }
+                    ),
                     Style::new().fg(th.rd.at(1.0))
                 ),
                 Span::styled(
-                    format!("{:>8}", fmt::rate(v.wr_bps)),
+                    format!(
+                        "{:>8}",
+                        if v.stats_valid {
+                            fmt::rate(v.wr_bps)
+                        } else {
+                            "-".into()
+                        }
+                    ),
                     Style::new().fg(th.wr.at(1.0))
                 ),
                 Span::styled(
@@ -273,8 +301,21 @@ pub(super) fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) 
                     Style::new().fg(lat_color(th, v.wr_lat_us))
                 ),
                 Span::styled(
-                    format!("{:>5}", v.errors),
-                    Style::new().fg(if v.errors > 0 { th.bad } else { th.dim }),
+                    format!(
+                        "{:>5}",
+                        if v.collection_error {
+                            "read!".into()
+                        } else {
+                            v.errors.to_string()
+                        }
+                    ),
+                    Style::new().fg(if v.errors > 0 {
+                        th.bad
+                    } else if v.collection_error {
+                        th.warn
+                    } else {
+                        th.dim
+                    }),
                 ),
             ]));
             if backing_line_wanted(&v.backing) {
