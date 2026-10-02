@@ -3,6 +3,22 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- Domain names are no longer cut while there is room to show them:
+  - the mem box cut them at 12 characters; names now get as much room as
+    the longest one needs, up to half the row, so a wide mem box (cpu box
+    hidden with `1`) shows them in full;
+  - the same in the cpu box's "top domains" list (stock libxenstat),
+    which cut them at 9;
+  - the domain table's NAME column grew by at most 12 columns; it now
+    grows to the longest name, leaving the CPU history at least half of
+    the spare width. Long names never push other columns out;
+  - SR names in the SR view (`v`) use the width left over past 20
+    columns.
+
 ## [0.3.1] - 2026-10-01
 
 ### Changed

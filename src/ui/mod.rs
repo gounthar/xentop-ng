@@ -451,7 +451,12 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             w as u16,
             &Line::from(dim(th, "top domains  (no per-pCPU data, see i)")),
         );
-        let mw = w.saturating_sub(14 + 6 + 2);
+        // Names as long as the longest one, up to half of what the name
+        // and meter share.
+        let room = w.saturating_sub(4 + 1 + 6 + 2);
+        let longest = doms.iter().map(|d| fmt::width(&d.name)).max().unwrap_or(0);
+        let nw = longest.min((room / 2).max(9));
+        let mw = room.saturating_sub(nw);
         for (i, d) in doms.iter().take(rows.saturating_sub(1)).enumerate() {
             let cap = (d.vcpus_online.max(1) * 100) as f64;
             // IDs next to names: anyone who can rename a VM can call it
@@ -459,7 +464,7 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             let mut sp = vec![
                 dim(th, format!("{:>3} ", d.id)),
                 Span::styled(
-                    format!("{} ", fmt::pad(&d.name, 9, false)),
+                    format!("{} ", fmt::pad(&d.name, nw, false)),
                     Style::new().fg(th.fg),
                 ),
             ];
@@ -715,7 +720,11 @@ fn mem_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     }
     let mut doms: Vec<&DomRates> = r.domains.iter().collect();
     doms.sort_by_key(|d| std::cmp::Reverse(d.mem));
-    let nw = (w / 3).clamp(8, 16);
+    // Names as long as the longest one, up to half of what the name and
+    // meter share: a wide box (cpu box hidden) shows them in full.
+    let room = w.saturating_sub(4 + 1 + 7);
+    let longest = doms.iter().map(|d| fmt::width(&d.name)).max().unwrap_or(0);
+    let nw = longest.min((room / 2).max((w / 3).clamp(8, 16) - 4)) + 4;
     let mw = w.saturating_sub(nw + 1 + 7);
     for d in doms {
         if y >= bottom {
@@ -975,6 +984,7 @@ enum SrCol {
 /// what's left.
 /// `sr_w` and `kind_w` are what the SR names and types would like.
 fn sr_cols(width: usize, sr_w: usize, kind_w: usize) -> Vec<(SrCol, usize)> {
+    let sr_full = sr_w.max(8);
     let sr_w = sr_w.clamp(8, 20);
     // (column, width, priority: lower = kept longer)
     let all = [
@@ -998,8 +1008,15 @@ fn sr_cols(width: usize, sr_w: usize, kind_w: usize) -> Vec<(SrCol, usize)> {
         let used: usize = cols.iter().map(|c| c.1 + 1).sum();
         if used <= width || max_prio == 0 {
             let mut spare = width.saturating_sub(used);
-            // VM names readable first, then a longer trend, then the rest.
-            for (col, max) in [(SrCol::Top, 8), (SrCol::Trend, 20), (SrCol::Top, 16)] {
+            // VM names readable first, then a longer trend, then the rest,
+            // then SR names past 20 columns.
+            let more = [
+                (SrCol::Top, 8),
+                (SrCol::Trend, 20),
+                (SrCol::Top, 16),
+                (SrCol::Sr, sr_full - sr_w),
+            ];
+            for (col, max) in more {
                 if let Some(c) = cols.iter_mut().find(|c| c.0 == col) {
                     let add = spare.min(max);
                     c.1 += add;
@@ -1312,7 +1329,8 @@ fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
     let vis_ids: Vec<u32> = app.visible().iter().map(|d| d.id).collect();
     let arrow = if app.reverse { "▲" } else { "▼" };
     let inner_w = area.width.saturating_sub(2);
-    let (cols, dropped) = columns::layout(&app.enabled_columns(), inner_w);
+    let name_w = r.domains.iter().map(|d| fmt::width(&d.name)).max().unwrap_or(0);
+    let (cols, dropped) = columns::layout(&app.enabled_columns(), inner_w, name_w);
     let mut right = vec![
         Span::styled(format!("{}", vis_ids.len()), Style::new().fg(th.fg)),
         dim(
