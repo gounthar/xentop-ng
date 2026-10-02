@@ -2,9 +2,12 @@
 //! no Xen FFI pointer needs Send, and the UI never waits on a collector.
 use super::{DataStatus, Source};
 use crate::model::Snapshot;
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
+use std::time::Duration;
 
 pub enum Update {
+    /// Initialization failure or unexpected worker termination.
+    Fatal(String),
     Ready {
         history: Vec<Snapshot>,
         status: DataStatus,
@@ -18,6 +21,10 @@ pub struct Collector {
     updates: Receiver<Update>,
     waiting: bool,
     stopped: bool,
+    startup: Receiver<Result<(), String>>,
+    starting: bool,
+    last_error: Option<String>,
+    spawn_error: Option<String>,
 }
 
 impl Collector {
@@ -25,6 +32,7 @@ impl Collector {
         open: impl FnOnce() -> anyhow::Result<Box<dyn Source>> + Send + 'static,
         warmup_secs: u32,
     ) -> Self {
+        let (startup_tx, startup) = mpsc::sync_channel(1);
         let (requests, rx) = mpsc::sync_channel(1);
         let (tx, updates) = mpsc::sync_channel(1);
         let result = std::thread::Builder::new()
@@ -33,10 +41,13 @@ impl Collector {
                 let mut source = match open() {
                     Ok(s) => s,
                     Err(e) => {
-                        let _ = tx.send(Update::Sample(Err(e.to_string())));
+                        let _ = startup_tx.send(Err(format!("{e:#}")));
                         return;
                     }
                 };
+                if startup_tx.send(Ok(())).is_err() {
+                    return;
+                }
                 let ready = Update::Ready {
                     history: source.warmup(warmup_secs),
                     status: source.status(),
@@ -55,13 +66,43 @@ impl Collector {
                     }
                 }
             });
-        // A failed spawn drops both worker endpoints; poll reports it.
-        drop(result);
+        let spawn_error = result.err().map(|e| format!("cannot start collector: {e}"));
         Self {
             requests,
             updates,
             waiting: true,
             stopped: false,
+            startup,
+            starting: true,
+            last_error: None,
+            spawn_error,
+        }
+    }
+
+    /// Wait only briefly before opening the terminal. A slow initializer
+    /// continues on the worker; poll reports its eventual result in the UI.
+    pub fn wait_started(&mut self, timeout: Duration) -> Result<bool, String> {
+        if let Some(e) = self.spawn_error.take() {
+            self.stopped = true;
+            return Err(e);
+        }
+        if !self.starting {
+            return Ok(true);
+        }
+        match self.startup.recv_timeout(timeout) {
+            Ok(Ok(())) => {
+                self.starting = false;
+                Ok(true)
+            }
+            Ok(Err(e)) => {
+                self.stopped = true;
+                Err(e)
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(false),
+            Err(RecvTimeoutError::Disconnected) => {
+                self.stopped = true;
+                Err("collector stopped during initialization".into())
+            }
         }
     }
 
@@ -75,15 +116,27 @@ impl Collector {
         if self.stopped {
             return None;
         }
+        match self.wait_started(Duration::ZERO) {
+            Ok(false) => return None,
+            Err(e) => return Some(Update::Fatal(e)),
+            Ok(true) => {}
+        }
         match self.updates.try_recv() {
             Ok(u) => {
                 self.waiting = false;
+                if let Update::Sample(result) = &u {
+                    self.last_error = result.as_ref().err().cloned();
+                }
                 Some(u)
             }
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
                 self.stopped = true;
-                Some(Update::Sample(Err("collector stopped".into())))
+                Some(Update::Fatal(
+                    self.last_error
+                        .take()
+                        .unwrap_or_else(|| "collector stopped".into()),
+                ))
             }
         }
     }
@@ -142,6 +195,58 @@ mod tests {
     #[test]
     fn initialization_error_is_reported() {
         let mut c = Collector::spawn(|| anyhow::bail!("cannot open Xen"), 0);
-        assert!(matches!(await_update(&mut c), Update::Sample(Err(e)) if e == "cannot open Xen"));
+        assert!(matches!(await_update(&mut c), Update::Fatal(e) if e == "cannot open Xen"));
+        for _ in 0..10 {
+            assert!(c.poll().is_none());
+        }
+    }
+
+    #[test]
+    fn startup_wait_returns_the_original_error() {
+        let mut c = Collector::spawn(|| anyhow::bail!("missing library"), 0);
+        assert_eq!(
+            c.wait_started(Duration::from_secs(2)),
+            Err("missing library".into())
+        );
+        assert!(c.poll().is_none());
+    }
+
+    #[test]
+    fn slow_initialization_can_be_abandoned() {
+        let (tx, rx) = mpsc::channel();
+        let mut c = Collector::spawn(
+            move || {
+                rx.recv().unwrap();
+                anyhow::bail!("late failure")
+            },
+            0,
+        );
+        assert_eq!(c.wait_started(Duration::from_millis(1)), Ok(false));
+        tx.send(()).unwrap();
+        assert!(matches!(await_update(&mut c), Update::Fatal(e) if e == "late failure"));
+        assert!(c.poll().is_none());
+    }
+
+    #[test]
+    fn disconnect_preserves_last_sampling_error() {
+        let (requests, _rx) = mpsc::sync_channel(1);
+        let (tx, updates) = mpsc::sync_channel(1);
+        let (_startup_tx, startup) = mpsc::sync_channel(1);
+        let mut c = Collector {
+            requests,
+            updates,
+            waiting: true,
+            stopped: false,
+            startup,
+            starting: false,
+            last_error: None,
+            spawn_error: None,
+        };
+        tx.send(Update::Sample(Err("specific read error".into())))
+            .unwrap();
+        drop(tx);
+        assert!(matches!(c.poll(), Some(Update::Sample(Err(_)))));
+        assert!(matches!(c.poll(), Some(Update::Fatal(e)) if e == "specific read error"));
+        assert!(c.poll().is_none());
     }
 }

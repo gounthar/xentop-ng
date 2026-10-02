@@ -106,6 +106,7 @@ pub struct App {
     /// Box layout to restore when leaving domains-only mode (`5`).
     saved_show: Option<[bool; 4]>,
     pub error: Option<String>,
+    pub fatal_error: Option<String>,
     pub toast: Option<Toast>,
     pub config: Option<ConfigState>,
     pub quit: bool,
@@ -148,6 +149,7 @@ impl App {
             sr_view: false,
             saved_show: None,
             error: None,
+            fatal_error: None,
             toast: None,
             config: None,
             quit: false,
@@ -242,6 +244,7 @@ impl App {
         if let Some(update) = self.collector.poll() {
             changed = true;
             match update {
+                Update::Fatal(e) => self.fatal_error = Some(e),
                 Update::Ready {
                     history,
                     status,

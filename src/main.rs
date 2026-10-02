@@ -243,11 +243,13 @@ fn startup_prefs(o: &Opts) -> (Prefs, Option<app::ConfigState>, Vec<String>) {
 
 fn run_ui(open: impl FnOnce() -> Result<Box<dyn Source>> + Send + 'static, o: &Opts) -> Result<()> {
     let (prefs, cfg, warnings) = startup_prefs(o);
-    let mut app = App::new(
-        source::worker::Collector::spawn(open, 600),
-        prefs.interval,
-        prefs.theme,
-    );
+    let mut collector = source::worker::Collector::spawn(open, 600);
+    // Fast failures never enter raw mode. A hung open remains cancellable
+    // through the UI after this bounded grace period.
+    collector
+        .wait_started(Duration::from_millis(250))
+        .map_err(anyhow::Error::msg)?;
+    let mut app = App::new(collector, prefs.interval, prefs.theme);
     let term = std::env::var("TERM").ok();
     // no-color.org: set and not empty.
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
@@ -270,6 +272,9 @@ fn run_ui(open: impl FnOnce() -> Result<Box<dyn Source>> + Send + 'static, o: &O
         let mut last_draw = Instant::now();
         while !app.quit {
             redraw |= app.tick();
+            if let Some(e) = app.fatal_error.take() {
+                bail!("{e}");
+            }
             if redraw || last_draw.elapsed() >= Duration::from_secs(1) {
                 term.draw(|f| ui::draw(f, &mut app))?;
                 last_draw = Instant::now();
