@@ -11,7 +11,7 @@ libxenstat.
 
 | Patch | Touches | To get the data |
 |---|---|---|
-| 0001, 0002 | libxenstat | replace libxenstat (no reboot) |
+| 0001, 0002, 0005 | libxenstat | replace libxenstat (no reboot) |
 | 0003 | **hypervisor**, public headers, libxenctrl | rebuild Xen, install it, **reboot** |
 | 0004 | libxenstat | replace libxenstat; per-vCPU steal shows up once the hypervisor has 0003 |
 
@@ -164,12 +164,16 @@ booted on a rebuilt hypervisor.
   vCPUs of a domain in one call, via a guest handle) instead of one call
   per vCPU, and whether to bump `XEN_DOMCTL_INTERFACE_VERSION` in this
   release cycle (not needed for a new sub-op, but customary for some).
-- Harden the existing `read_attributes_vbd3()`. It is not ours, but sits in
-  the same path: it opens `/dev/shm/td3-<pid>/vbd-*` with plain `fopen()`.
-  Use `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, then `fstat()` for a root-owned
-  regular file of at least `sizeof(struct vbd3_stats)` bytes. That is what
-  xentop-ng's own fallback does.
 - Consider exporting a version marker (e.g. `xenstat_ext_version()`), so
   consumers can tell the semantics apart if the accessors change during
   review.
 
+
+## 0005: safe tapdisk stats reads
+
+Both patch sets now validate numeric PIDs and open stats relative to verified
+root-owned directory descriptors. Symlinks, writable files/directories, hard
+links, non-regular files and invalid sizes are rejected; nonblocking opens
+prevent FIFOs from hanging the collector. Run `python3 tests/libxenstat/check-reader.py`
+to exercise the reader without a Xen host. Stock libraries must be updated
+separately: Rust fallback checks cannot protect reads already made by libxenstat.
