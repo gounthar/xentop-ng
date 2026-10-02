@@ -502,3 +502,13 @@ Ideas and possible next steps are in [IDEAS.md](IDEAS.md).
 
 GPL-2.0-only; see [LICENSE](LICENSE). The libxenstat patches follow the
 license of the Xen files they modify.
+
+### Counter identity and recovery
+
+VM identity is read from xenstore on each sample; XAPI is not required.
+Renames preserve history when a UUID is available. UUID changes, disappearing
+identity and CPU counter rollback start a new baseline. Without a UUID,
+domid/name and counter rollback provide a conservative fallback. A restart
+entirely between samples whose identity and counters appear continuous cannot
+be identified reliably. Disk backing changes and failed reads also require a
+fresh baseline; collection errors are separate from disk-reported I/O errors.

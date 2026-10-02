@@ -2,8 +2,8 @@
 //! backs each VBD, each domain's VM UUID, and its balloon target.
 //!
 //! libxenstore is dlopen()ed like libxenstat; only its long-stable core
-//! (xs_open, xs_read, xs_close) is used. Per sample this costs one read per
-//! domain (`memory/target`) and one per VBD (`params`); the rest is cached
+//! (xs_open, xs_read, xs_close) is used. Per sample this costs two reads per
+//! domain (`vm`, `memory/target`) and one per VBD (`params`); the rest is cached
 //! and only re-read when `params` changes or a domain appears.
 //!
 //! xenstore paths used (backend nodes are written by the dom0 toolstack,
@@ -105,8 +105,6 @@ impl Drop for Xs {
 /// Fills in VM UUIDs, balloon targets and VBD backings on each sample.
 pub struct StorageMap {
     xs: Option<Xs>,
-    /// domid -> (name it had, VM UUID), so the `vm` node is read once.
-    vms: HashMap<u32, (String, Option<String>)>,
     /// (domid, dev) -> (params, backing): re-parsed only when params change.
     vbds: HashMap<(u32, u32), (String, Option<Backing>)>,
     kinds: SrKinds,
@@ -127,7 +125,6 @@ impl StorageMap {
     pub fn open() -> Self {
         StorageMap {
             xs: Xs::open(),
-            vms: HashMap::new(),
             vbds: HashMap::new(),
             kinds: SrKinds::default(),
         }
@@ -144,26 +141,18 @@ impl StorageMap {
         let mut reads = 0usize;
 
         // Forget domains and disks that are gone.
-        let doms: HashSet<u32> = snap.domains.iter().map(|d| d.id).collect();
         let disks: HashSet<(u32, u32)> = snap
             .domains
             .iter()
             .flat_map(|d| d.vbds.iter().map(|v| (d.id, v.dev)))
             .collect();
-        self.vms.retain(|id, _| doms.contains(id));
         self.vbds.retain(|k, _| disks.contains(k));
 
         for d in snap.domains.iter_mut().take(MAX_DOMS) {
             let base = format!("/local/domain/{}", d.id);
-            let cached = self.vms.get(&d.id).filter(|(name, _)| *name == d.name);
-            d.vm_uuid = match cached {
-                Some((_, u)) => u.clone(),
-                None => {
-                    let u = xs.read(&format!("{base}/vm")).and_then(|p| vm_uuid(&p));
-                    self.vms.insert(d.id, (d.name.clone(), u.clone()));
-                    u
-                }
-            };
+            // Read identity each time: domids are reusable, names are mutable,
+            // and a failed read at startup must not be cached forever.
+            d.vm_uuid = xs.read(&format!("{base}/vm")).and_then(|p| vm_uuid(&p));
             d.mem_target = xs
                 .read(&format!("{base}/memory/target"))
                 .and_then(|s| parse_kib(&s));

@@ -243,6 +243,8 @@ pub struct HostRates {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DomRates {
+    /// No compatible preceding domain sample; start history afresh.
+    pub baseline_reset: bool,
     pub id: u32,
     pub name: String,
     pub state: Option<DomState>,
@@ -469,10 +471,30 @@ pub fn vbd_name(dev: u32) -> String {
     format!("xvd{}", letters(index))
 }
 
+/// UUID is a Xen/xenstore identity, independent of XAPI. Counter rollback
+/// also invalidates a run, since a reboot can retain the VM's UUID.
+fn same_domain(prev: &DomainRaw, cur: &DomainRaw) -> bool {
+    let identity = match (&prev.vm_uuid, &cur.vm_uuid) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => prev.name == cur.name,
+        _ => false, // Metadata disappeared or became available: rebaseline.
+    };
+    identity && cur.cpu_ns >= prev.cpu_ns && cur.vcpus.iter().zip(&prev.vcpus).all(|(c, p)| c.ns >= p.ns)
+}
+
+fn same_backing(a: &Option<Backing>, b: &Option<Backing>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.sr == b.sr && a.vdi == b.vdi && a.path == b.path,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Never derive rates from failed reads or across counter resets.
 fn valid_vbd_pair(prev: &VbdRaw, cur: &VbdRaw) -> bool {
     !prev.error
         && !cur.error
+        && same_backing(&prev.backing, &cur.backing)
         && cur.rd_reqs >= prev.rd_reqs
         && cur.wr_reqs >= prev.wr_reqs
         && cur.rd_sects >= prev.rd_sects
@@ -504,8 +526,9 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
 
     let mut domains = Vec::with_capacity(cur.domains.len());
     for dom in &cur.domains {
-        let p = prev_doms.get(&dom.id).filter(|p| p.name == dom.name);
+        let p = prev_doms.get(&dom.id).filter(|p| same_domain(p, dom));
         let mut r = DomRates {
+            baseline_reset: p.is_none(),
             id: dom.id,
             name: dom.name.clone(),
             state: Some(dom.state),
@@ -814,6 +837,53 @@ mod rate_tests {
         );
         // No previous sample for "new": no bogus 400% spike.
         assert_eq!(r.domains[0].cpu_pct, 0.0);
+    }
+
+    #[test]
+    fn identity_without_xapi_and_rename() {
+        let t = Instant::now();
+        let mut a = snap(t, vec![dom(5, "old name", 100, 100)]);
+        let mut b = snap(t + Duration::from_secs(1), vec![dom(5, "renamed", 200, 110)]);
+        a.domains[0].vm_uuid = Some("uuid-a".into());
+        b.domains[0].vm_uuid = Some("uuid-a".into());
+        let r = compute(&a, &b);
+        assert!(!r.domains[0].baseline_reset);
+        assert_eq!(r.domains[0].disk_rd_iops, 10.0);
+        let mut history = crate::history::History::default();
+        history.record(&r);
+        let mut renamed = r.clone();
+        renamed.domains[0].name = "renamed again".into();
+        history.record(&renamed);
+        assert_eq!(history.doms[&5].cpu.tail(10).len(), 2);
+        b.domains[0].name = a.domains[0].name.clone();
+        b.domains[0].vm_uuid = Some("uuid-b".into());
+        let r = compute(&a, &b);
+        assert!(r.domains[0].baseline_reset);
+        assert_eq!(r.domains[0].disk_rd_iops, 0.0);
+        history.record(&r);
+        assert_eq!(history.doms[&5].cpu.tail(10).len(), 1);
+        b.domains[0].vm_uuid = Some("uuid-a".into());
+        b.domains[0].cpu_ns = 1;
+        assert!(compute(&a, &b).domains[0].baseline_reset);
+        a.domains[0].vm_uuid = None;
+        b.domains[0].vm_uuid = None;
+        assert!(compute(&a, &b).domains[0].baseline_reset);
+    }
+
+    #[test]
+    fn disk_replacement_at_same_slot_starts_fresh() {
+        let t = Instant::now();
+        let mut a = snap(t, vec![dom(5, "vm", 100, 100)]);
+        let mut b = snap(t + Duration::from_secs(1), vec![dom(5, "vm", 200, 500)]);
+        a.domains[0].vbds[0].backing = Some(Backing {
+            path: Some("/old".into()),
+            ..Default::default()
+        });
+        b.domains[0].vbds[0].backing = Some(Backing {
+            path: Some("/new".into()),
+            ..Default::default()
+        });
+        assert!(!compute(&a, &b).domains[0].vbds[0].stats_valid);
     }
 
     /// A VBD on `sr` that did `reqs` reads taking `us` µs in all, plus the

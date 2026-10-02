@@ -157,7 +157,7 @@ impl History {
 
         for d in &r.domains {
             let e = self.doms.entry(d.id).or_default();
-            if e.name != d.name {
+            if d.baseline_reset || e.last_seen + 1 != self.tick {
                 *e = DomHistory {
                     name: d.name.clone(),
                     ..Default::default()
@@ -165,6 +165,7 @@ impl History {
                 // A new domain under a reused id: its disks start over too.
                 self.vbds.retain(|(id, _), _| *id != d.id);
             }
+            e.name = d.name.clone();
             e.last_seen = self.tick;
             e.cpu.push(d.cpu_pct);
             e.rx.push(d.net_rx_bps);
@@ -194,6 +195,10 @@ impl History {
         }
         for d in &r.domains {
             for v in d.vbds.iter().filter(|v| v.backing.group().is_some()) {
+                if !v.stats_valid {
+                    self.vbds.remove(&(d.id, v.dev));
+                    continue;
+                }
                 let e = self.vbds.entry((d.id, v.dev)).or_default();
                 e.push(v.rd_iops + v.wr_iops, worst(v.rd_lat_us, v.wr_lat_us), dt, tick);
             }
