@@ -197,29 +197,33 @@ impl StorageMap {
                     break;
                 }
                 let node = format!("/local/domain/0/backend/{dir}/{}/{}", d.id, v.dev);
-                let Some(params) = xs.read(&format!("{node}/params")) else {
-                    // Backend gone (device being unplugged).
-                    self.vbds.remove(&(d.id, v.dev));
-                    continue;
-                };
                 let key = (d.id, v.dev);
-                let backing = match self.vbds.get(&key) {
-                    Some((p, b)) if *p == params => b.clone(),
-                    _ => {
-                        let mut b = parse_params(&params);
-                        if b.sr.is_none() && b.vdi.is_none() && v.kind == VbdKind::Vbd3 {
-                            // Not a path we understand: SM also publishes
-                            // the VDI and its SR ("mem-pool") under sm-data.
-                            let sm = |k: &str| xs.read(&format!("{node}/sm-data/{k}")).and_then(|s| uuid(&s));
-                            b.vdi = sm("vdi-uuid");
-                            if b.vdi.is_some() {
-                                b.sr = sm("mem-pool");
+                let backing = match xs.read(&format!("{node}/params")) {
+                    // Transient failure, or the backend going away during an
+                    // unplug. Either way it is still the same device: keep
+                    // its last known backing so the failure doesn't look like
+                    // a disk replacement and reset its baseline. Departed
+                    // disks are forgotten above.
+                    None => self.vbds.get(&key).and_then(|(_, b)| b.clone()),
+                    Some(params) => match self.vbds.get(&key) {
+                        Some((p, b)) if *p == params => b.clone(),
+                        _ => {
+                            let mut b = parse_params(&params);
+                            if b.sr.is_none() && b.vdi.is_none() && v.kind == VbdKind::Vbd3 {
+                                // Not a path we understand: SM also publishes
+                                // the VDI and its SR ("mem-pool") under sm-data.
+                                let sm =
+                                    |k: &str| xs.read(&format!("{node}/sm-data/{k}")).and_then(|s| uuid(&s));
+                                b.vdi = sm("vdi-uuid");
+                                if b.vdi.is_some() {
+                                    b.sr = sm("mem-pool");
+                                }
                             }
+                            let b = (b != Backing::default()).then_some(b);
+                            self.vbds.insert(key, (params, b.clone()));
+                            b
                         }
-                        let b = (b != Backing::default()).then_some(b);
-                        self.vbds.insert(key, (params, b.clone()));
-                        b
-                    }
+                    },
                 };
                 v.backing = backing.map(|mut b| {
                     if b.sr_kind.is_none() {
