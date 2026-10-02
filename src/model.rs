@@ -214,13 +214,26 @@ pub struct VbdExt {
 pub struct Coverage {
     pub available: usize,
     pub total: usize,
+    /// Newly observed, healthy devices still establishing a baseline.
+    pub pending: usize,
 }
 impl Coverage {
     pub fn complete(self) -> bool {
         self.available == self.total
     }
+    pub fn has_value(self) -> bool {
+        self.available > 0 || (self.total == 0 && self.pending == 0)
+    }
+    fn record(&mut self, valid: bool, pending: bool) {
+        if pending {
+            self.pending += 1;
+        } else {
+            self.total += 1;
+            self.available += usize::from(valid);
+        }
+    }
     pub fn label(self, value: String) -> String {
-        if self.total > 0 && self.available == 0 {
+        if !self.has_value() {
             "-".into()
         } else if !self.complete() {
             format!("{value}*")
@@ -323,6 +336,8 @@ impl DomRates {
 pub struct VbdRates {
     /// Two successful, monotonic counter samples from this device.
     pub stats_valid: bool,
+    /// A healthy new/replaced disk needs a baseline, not an error marker.
+    pub warming_up: bool,
     /// Collection failure, distinct from a disk-reported I/O error.
     pub collection_error: bool,
     pub dev: u32,
@@ -623,6 +638,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                 kind: Some(v.kind),
                 errors: v.ext.map(|e| e.io_errors).unwrap_or(0),
                 collection_error: v.error,
+                warming_up: !v.error && pv.is_none_or(|pv| !same_backing(&pv.backing, &v.backing)),
                 backing: v.backing.clone().unwrap_or_default(),
                 ..Default::default()
             };
@@ -655,8 +671,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                     }
                 }
             }
-            r.disk_samples.total += 1;
-            r.disk_samples.available += usize::from(vr.stats_valid);
+            r.disk_samples.record(vr.stats_valid, vr.warming_up);
             r.disk_rd_bps += vr.rd_bps;
             r.disk_wr_bps += vr.wr_bps;
             r.disk_rd_iops += vr.rd_iops;
@@ -666,8 +681,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
             if let Some(key) = vr.backing.group() {
                 let a = srs.entry(key).or_default();
                 a.r.vbds += 1;
-                a.r.disk_samples.total += 1;
-                a.r.disk_samples.available += usize::from(vr.stats_valid);
+                a.r.disk_samples.record(vr.stats_valid, vr.warming_up);
                 if a.r.kind.is_none() {
                     a.r.kind = vr.backing.sr_kind.clone();
                 }
@@ -692,6 +706,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
         host.net_rx_bps += r.net_rx_bps;
         host.net_tx_bps += r.net_tx_bps;
         host.disk_samples.total += r.disk_samples.total;
+        host.disk_samples.pending += r.disk_samples.pending;
         host.disk_samples.available += r.disk_samples.available;
         host.disk_rd_bps += r.disk_rd_bps;
         host.disk_wr_bps += r.disk_wr_bps;
@@ -725,6 +740,7 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                 host.pcpu_busy.push(busy);
             }
             host.pcpu_samples = Coverage {
+                pending: 0,
                 total: host.pcpu_busy.len(),
                 available: host.pcpu_busy.iter().flatten().count(),
             };
@@ -871,6 +887,69 @@ mod rate_tests {
     }
 
     #[test]
+    fn hotplug_is_pending_and_partial_graphs_keep_valid_sums() {
+        let t = Instant::now();
+        let mut old = dom(5, "vm", 100, 100);
+        old.vbds[0].rd_sects = 800;
+        old.vbds[0].backing = Some(Backing {
+            sr: Some("sr".into()),
+            ..Default::default()
+        });
+        let mut cur = old.clone();
+        cur.vbds[0].rd_reqs += 10;
+        cur.vbds[0].rd_sects += 80;
+        let mut extra = cur.vbds[0].clone();
+        extra.dev += 16;
+        cur.vbds.push(extra);
+        let a = snap(t, vec![old]);
+        let b = snap(t + Duration::from_secs(1), vec![cur]);
+        let r = compute(&a, &b);
+        assert!(r.domains[0].vbds[1].warming_up);
+        assert_eq!(
+            r.host.disk_samples,
+            Coverage {
+                available: 1,
+                total: 1,
+                pending: 1
+            }
+        );
+        assert!(r.host.disk_samples.complete());
+        assert_eq!(r.host.disk_samples.label("10".into()), "10");
+        let mut failed = b.clone();
+        failed.domains[0].vbds[1].error = true;
+        let r = compute(&a, &failed);
+        assert_eq!(
+            r.host.disk_samples,
+            Coverage {
+                available: 1,
+                total: 2,
+                pending: 0
+            }
+        );
+        assert_eq!(r.host.disk_samples.label("10".into()), "10*");
+        let mut h = crate::history::History::default();
+        h.record(&r);
+        assert_eq!(h.rd.tail(1), vec![40960.0]);
+        assert_eq!(h.riops.tail(1), vec![10.0]);
+        assert_eq!(h.doms[&5].rd.tail(1), vec![40960.0]);
+        assert_eq!(h.srs["sr"].iops.back(), Some(&10.0));
+        failed.domains[0].vbds[0].error = true;
+        let r = compute(&a, &failed);
+        h.record(&r);
+        assert!(h.rd.tail(1)[0].is_nan());
+        assert!(h.doms[&5].rd.tail(1)[0].is_nan());
+        assert!(h.srs["sr"].iops.back().unwrap().is_nan());
+        let pending = Coverage {
+            available: 0,
+            total: 0,
+            pending: 1,
+        };
+        assert!(!pending.has_value());
+        assert_eq!(pending.label("0".into()), "-");
+        assert!(Coverage::default().has_value(), "no disks is idle, not missing");
+    }
+
+    #[test]
     fn reused_domid_starts_fresh() {
         let t0 = Instant::now();
         let t1 = t0 + Duration::from_secs(1);
@@ -896,6 +975,7 @@ mod rate_tests {
         assert_eq!(
             r.host.pcpu_samples,
             Coverage {
+                pending: 0,
                 available: 1,
                 total: 2
             }

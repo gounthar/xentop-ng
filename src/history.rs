@@ -157,13 +157,13 @@ impl History {
         self.rx.push(h.net_rx_bps);
         self.tx.push(h.net_tx_bps);
         self.rd
-            .push_optional(h.disk_samples.complete().then_some(h.disk_rd_bps));
+            .push_optional(h.disk_samples.has_value().then_some(h.disk_rd_bps));
         self.wr
-            .push_optional(h.disk_samples.complete().then_some(h.disk_wr_bps));
+            .push_optional(h.disk_samples.has_value().then_some(h.disk_wr_bps));
         self.riops
-            .push_optional(h.disk_samples.complete().then_some(h.disk_rd_iops));
+            .push_optional(h.disk_samples.has_value().then_some(h.disk_rd_iops));
         self.wiops
-            .push_optional(h.disk_samples.complete().then_some(h.disk_wr_iops));
+            .push_optional(h.disk_samples.has_value().then_some(h.disk_wr_iops));
         self.rlat.push_optional(h.disk_rd_lat_us);
         self.wlat.push_optional(h.disk_wr_lat_us);
 
@@ -182,8 +182,8 @@ impl History {
             e.cpu.push(d.cpu_pct);
             e.rx.push(d.net_rx_bps);
             e.tx.push(d.net_tx_bps);
-            e.rd.push_optional(d.disk_samples.complete().then_some(d.disk_rd_bps));
-            e.wr.push_optional(d.disk_samples.complete().then_some(d.disk_wr_bps));
+            e.rd.push_optional(d.disk_samples.has_value().then_some(d.disk_rd_bps));
+            e.wr.push_optional(d.disk_samples.has_value().then_some(d.disk_wr_bps));
             e.lat.push_optional(d.lat_us());
             e.mem.push(d.mem as f64);
             if e.vcpus.len() != d.vcpu_pct.len() {
@@ -204,7 +204,7 @@ impl History {
         for s in &r.srs {
             let e = self.srs.entry(s.sr.clone()).or_default();
             e.push(
-                if s.disk_samples.complete() {
+                if s.disk_samples.has_value() {
                     s.iops()
                 } else {
                     f64::NAN

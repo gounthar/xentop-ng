@@ -141,6 +141,7 @@ fn has_vcpu_steal(d: &DomainRaw) -> bool {
 }
 pub fn steal_coverage(snap: &Snapshot) -> Coverage {
     Coverage {
+        pending: 0,
         total: snap.domains.len(),
         available: snap
             .domains
@@ -157,6 +158,7 @@ pub fn latency_coverage(snap: &Snapshot) -> Coverage {
         .filter(|v| v.kind == VbdKind::Vbd3)
         .collect();
     Coverage {
+        pending: 0,
         total: disks.len(),
         available: disks.iter().filter(|v| v.ext.is_some() && !v.error).count(),
     }
@@ -407,6 +409,7 @@ mod tests {
         assert_eq!(
             latency_coverage(&s),
             Coverage {
+                pending: 0,
                 available: 1,
                 total: 2
             }
