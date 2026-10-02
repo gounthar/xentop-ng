@@ -7,10 +7,10 @@
 //! columns simply show "-".
 
 use super::dl;
-use super::fallback::{self, Vbd3Index, XcCpuInfo, XcDomRunstate};
+use super::gaps::{self, HostCollectors};
 use super::xapi::Xapi;
 use super::xenstore::StorageMap;
-use super::{Avail, DataStatus, Source, XapiState};
+use super::{DataStatus, Source, XapiState};
 use crate::model::*;
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::Library;
@@ -107,15 +107,12 @@ pub struct XenstatSource {
     handle: P,
     lib_name: String,
     hostname: String,
-    /// pCPU idle fallback, opened when libxenstat lacks pcpu_idle_ns.
-    xc: Option<XcCpuInfo>,
+    /// What libxenstat lacks, read from the host.
+    collectors: HostCollectors,
     /// VM UUIDs, balloon targets and VBD -> SR/VDI, from xenstore.
     storage: StorageMap,
     /// SR/VDI/network names, on hosts running xapi.
     xapi: Option<Xapi>,
-    /// Domain steal-time fallback, opened the first time it is needed
-    /// (outer None: not tried yet).
-    xc_runstate: Option<Option<XcDomRunstate>>,
     status: DataStatus,
     // Keeps the function pointers above valid; declared last so it is
     // dropped after `handle` has been released in Drop.
@@ -233,20 +230,15 @@ impl XenstatSource {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "xen".into());
 
-        let xc = if api.pcpu_idle_ns.is_none() {
-            XcCpuInfo::open()
-        } else {
-            None
-        };
+        let collectors = HostCollectors::new(api.pcpu_idle_ns.is_none());
         Ok(Self {
             api,
             handle,
             lib_name,
             hostname,
-            xc,
+            collectors,
             storage: StorageMap::open(),
             xapi: None,
-            xc_runstate: None,
             status: DataStatus::default(),
             _lib: lib,
         })
@@ -260,8 +252,10 @@ fn cstr(p: *const c_char) -> String {
     crate::fmt::sanitize(&unsafe { CStr::from_ptr(p) }.to_string_lossy())
 }
 
-impl Source for XenstatSource {
-    fn sample(&mut self) -> Result<Snapshot> {
+impl XenstatSource {
+    /// Copy one libxenstat node out into a [`Snapshot`], as the library
+    /// reports it: the only place its data structures are touched.
+    fn read_node(&self) -> Result<Snapshot> {
         let a = &self.api;
         let node = unsafe { (a.get_node)(self.handle, XENSTAT_ALL) };
         if node.is_null() {
@@ -407,8 +401,18 @@ impl Source for XenstatSource {
             }
         };
         unsafe { (a.free_node)(node) };
-        let mut snap = snap;
-        self.fill_gaps(&mut snap);
+        Ok(snap)
+    }
+}
+
+impl Source for XenstatSource {
+    fn sample(&mut self) -> Result<Snapshot> {
+        let mut snap = self.read_node()?;
+        let g = gaps::fill(&mut snap, self.api.ext.is_some(), &mut self.collectors);
+        self.status.pcpu = g.pcpu;
+        self.status.vifs = g.vifs;
+        self.status.steal = g.steal;
+        self.status.vbd_latency = g.vbd_latency;
         self.status.storage = self.storage.fill(&mut snap);
         if let Some(x) = &mut self.xapi {
             x.fill(&mut snap);
@@ -437,101 +441,6 @@ impl XenstatSource {
             (true, Some(x)) => x.state(),
         };
         self
-    }
-
-    /// Patch over what this libxenstat lacks, and record where each class of
-    /// metrics came from.
-    fn fill_gaps(&mut self, snap: &mut Snapshot) {
-        // pCPU idle time.
-        self.status.pcpu = if snap.pcpu_idle_ns.is_some() {
-            Avail::Lib
-        } else if let Some(v) = self.xc.as_mut().and_then(|xc| xc.idle()) {
-            snap.pcpu_idle_ns = Some(v);
-            Avail::Fallback
-        } else {
-            Avail::Missing
-        };
-
-        // VIFs: stock libxenstat drops them all on hosts without a Linux
-        // bridge. Rebuild any guest's VIFs from /proc/net/dev.
-        self.status.vifs = Avail::Lib;
-        if snap.domains.iter().any(|d| d.id != 0 && d.nets.is_empty()) {
-            let vifs = fallback::proc_net_vifs();
-            for d in snap.domains.iter_mut().filter(|d| d.id != 0 && d.nets.is_empty()) {
-                let mut nets: Vec<NetRaw> = vifs
-                    .iter()
-                    .filter(|((domid, _), _)| *domid == d.id)
-                    .map(|(_, n)| n.clone())
-                    .collect();
-                if !nets.is_empty() {
-                    nets.sort_by_key(|n| n.id);
-                    d.nets = nets;
-                    self.status.vifs = Avail::Fallback;
-                }
-            }
-        }
-
-        // Steal time: per vCPU from libxenstat (needs the hypervisor
-        // patch too), else per domain from XCP-ng's own domctl.
-        let per_vcpu = |d: &DomainRaw| !d.vcpus.is_empty() && d.vcpus.iter().all(|v| v.runnable_ns.is_some());
-        self.status.steal = if snap.domains.iter().any(per_vcpu) {
-            Avail::Lib
-        } else {
-            let xc = self.xc_runstate.get_or_insert_with(XcDomRunstate::open);
-            let mut found = false;
-            if let Some(xc) = xc.as_mut() {
-                for d in snap.domains.iter_mut().filter(|d| !per_vcpu(d)) {
-                    d.runnable_ns = xc.runnable_ns(d.id, d.vcpus.len());
-                    found |= d.runnable_ns.is_some();
-                }
-            }
-            if found {
-                Avail::Fallback
-            } else {
-                Avail::Missing
-            }
-        };
-
-        // tapdisk3 latency.
-        let vbd3 = |snap: &Snapshot| {
-            snap.domains
-                .iter()
-                .flat_map(|d| d.vbds.iter())
-                .filter(|v| v.kind == VbdKind::Vbd3)
-                .count()
-        };
-        let total = vbd3(snap);
-        self.status.vbd_latency = if total == 0 {
-            Avail::NotApplicable
-        } else if self.api.ext.is_some() {
-            let with_ext = snap
-                .domains
-                .iter()
-                .flat_map(|d| d.vbds.iter())
-                .filter(|v| v.ext.is_some())
-                .count();
-            if with_ext > 0 {
-                Avail::Lib
-            } else {
-                Avail::Missing
-            }
-        } else {
-            let idx = Vbd3Index::scan();
-            let mut found = 0;
-            if !idx.is_empty() {
-                for d in &mut snap.domains {
-                    for v in d.vbds.iter_mut().filter(|v| v.kind == VbdKind::Vbd3) {
-                        v.ext = idx.read(d.id, v.dev);
-                        found += v.ext.is_some() as usize;
-                    }
-                }
-            }
-            if found > 0 {
-                Avail::Fallback
-            } else {
-                Avail::Missing
-            }
-        };
     }
 }
 

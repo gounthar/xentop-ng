@@ -319,12 +319,9 @@ impl Vbd3Index {
         Self { stats }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.stats.is_empty()
-    }
-
-    pub fn read(&self, domid: u32, dev: u32) -> Option<VbdExt> {
-        self.stats.get(&(domid, dev)).copied()
+    /// Counters by (domid, dev).
+    pub fn into_map(self) -> HashMap<(u32, u32), VbdExt> {
+        self.stats
     }
 }
 
