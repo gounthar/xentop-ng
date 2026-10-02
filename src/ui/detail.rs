@@ -309,7 +309,13 @@ pub(super) fn detail_box(buf: &mut Buffer, app: &App, d: &DomRates, area: Rect) 
                             v.errors.to_string()
                         }
                     ),
-                    Style::new().fg(if v.errors > 0 { th.bad } else { th.dim }),
+                    Style::new().fg(if v.errors > 0 {
+                        th.bad
+                    } else if v.collection_error {
+                        th.warn
+                    } else {
+                        th.dim
+                    }),
                 ),
             ]));
             if backing_line_wanted(&v.backing) {
