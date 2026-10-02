@@ -119,6 +119,10 @@ Download from [Releases](https://github.com/olivierlambert/xentop-ng/releases):
 - **Any other x86_64 Linux dom0** (glibc 2.17 or newer):
   `xentop-ng-<version>-x86_64-linux-gnu.tar.gz` contains the binary. It uses
   the system libxenstat, with built-in fallbacks for the gaps (below).
+- **Arm64 and RISC-V dom0s:** `xentop-ng-<version>-aarch64-linux-gnu.tar.gz`
+  (glibc 2.17 or newer) and `xentop-ng-<version>-riscv64-linux-gnu.tar.gz`
+  (glibc 2.27 or newer), the binary alone like the x86_64 one. Not tried on
+  real hardware yet, see [Architectures](#architectures); feedback welcome.
 
 Release archives come with `SHA256SUMS` and GitHub build provenance
 attestations (`gh attestation verify <file> --repo olivierlambert/xentop-ng`).
@@ -213,6 +217,7 @@ toolchain (`rust-toolchain.toml`) and rustup-init (by checksum).
 ```sh
 build/build-libxenstat.sh     # patched libxenstat.so.4.17 (XCP-ng 4.17.6 + our patches)
 build/build-xentop-ng.sh      # xentop-ng binary
+build/build-cross.sh          # arm64 and riscv64 binaries, tested under qemu-user
 build/deploy.sh HOST          # installs to /opt/xentop-ng on HOST over ssh, nothing else touched
 dist/package.sh vX.Y.Z        # release archives in build/out/release/
 ```
@@ -220,6 +225,30 @@ dist/package.sh vX.Y.Z        # release archives in build/out/release/
 These build and install user space only. The hypervisor half of steal time
 (patch 0003) goes into XCP-ng's Xen RPM build instead; see
 [libxenstat/README.md](libxenstat/README.md#0003-and-0004-steal-time).
+
+### Architectures
+
+| Architecture | Download | glibc | Status |
+|---|---|---|---|
+| x86_64 | `x86_64-linux-gnu`, `xcp-ng-8.3` | 2.17+ | Tested on Xen hosts (XCP-ng 8.3) |
+| arm64 (aarch64) | `aarch64-linux-gnu` | 2.17+ | Built and tested under qemu-user only |
+| RISC-V (riscv64) | `riscv64-linux-gnu` | 2.27+ | Built and tested under qemu-user only |
+
+Upstream `xentop` runs on Arm64 Xen, so xentop-ng aims to as well. The
+arm64 and riscv64 binaries are cross-built (`build/build-cross.sh`), and
+every release runs the full test suite and the demo on them under
+qemu-user. None has run on a real Arm or RISC-V Xen host yet. RISC-V is
+ahead of need: Xen's RISC-V port doesn't run a dom0 with the tools yet.
+
+Nothing in xentop-ng depends on the architecture except the XCP-ng steal
+time fallback, and XCP-ng is x86_64 only. Our steal time patches for
+upstream Xen ([0003, 0004](libxenstat/README.md#0003-and-0004-steal-time))
+are architecture-neutral.
+
+**Running it on Arm or RISC-V?** Please
+[open an issue](https://github.com/olivierlambert/xentop-ng/issues), even
+if everything works: your Xen version and distribution, what looks right or
+wrong, and the `"sources"` part of `xentop-ng --batch -n 1`.
 
 ### Security notes
 

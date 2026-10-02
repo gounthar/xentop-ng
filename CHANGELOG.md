@@ -3,6 +3,15 @@
 Notable changes to xentop-ng. Versions follow [Semantic Versioning](https://semver.org/);
 release binaries are on the [releases page](https://github.com/olivierlambert/xentop-ng/releases).
 
+## [Unreleased]
+
+### Added
+
+- Downloads for arm64 (`aarch64-linux-gnu`, glibc 2.17 or newer) and
+  RISC-V (`riscv64-linux-gnu`, glibc 2.27 or newer) dom0s. They are
+  cross-built, and each release runs the test suite and the demo under
+  qemu-user; they haven't been tried on a real Arm or RISC-V Xen host yet.
+
 ## [0.3.2] - 2026-10-02
 
 ### Fixed

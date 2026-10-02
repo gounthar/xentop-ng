@@ -1,7 +1,7 @@
 # cargo-deny: run `cargo deny check` (also in CI).
 
 [graph]
-targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu"]
 
 [advisories]
 # Fail on any known vulnerability; unmaintained/yanked crates are reviewed

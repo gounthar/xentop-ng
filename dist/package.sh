@@ -5,6 +5,8 @@
 #
 # Produces in build/out/release/:
 #   xentop-ng-VERSION-x86_64-linux-gnu.tar.gz   the binary (glibc >= 2.17)
+#   xentop-ng-VERSION-aarch64-linux-gnu.tar.gz  the arm64 binary (glibc >= 2.17)
+#   xentop-ng-VERSION-riscv64-linux-gnu.tar.gz  the riscv64 binary (glibc >= 2.27)
 #   xentop-ng-VERSION-xcp-ng-8.3.tar.gz         binary + patched libxenstat
 #                                               + installer, for XCP-ng 8.3
 #   SHA256SUMS
@@ -17,14 +19,21 @@ rel="$out/release"
 rm -rf "$rel"
 mkdir -p "$rel"
 
-for f in xentop-ng xenstat-ext-test libxenstat.so.4.17.0; do
+for f in xentop-ng xenstat-ext-test libxenstat.so.4.17.0 aarch64/xentop-ng riscv64/xentop-ng; do
     [ -f "$out/$f" ] || { echo "error: $out/$f missing; run build/build-*.sh first" >&2; exit 1; }
 done
 
-# Generic binary.
+# Generic binaries.
 g="xentop-ng-$ver-x86_64-linux-gnu"
 mkdir -p "$rel/$g"
 cp "$out/xentop-ng" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE" "$rel/$g/"
+cross=()
+for a in aarch64 riscv64; do
+    d="xentop-ng-$ver-$a-linux-gnu"
+    mkdir -p "$rel/$d"
+    cp "$out/$a/xentop-ng" "$root/README.md" "$root/CHANGELOG.md" "$root/LICENSE" "$rel/$d/"
+    cross+=("$d")
+done
 
 # XCP-ng 8.3 bundle.
 x="xentop-ng-$ver-xcp-ng-8.3"
@@ -47,7 +56,7 @@ cp -r "$root/libxenstat" "$rel/$x/libxenstat"
 
 # Reproducible-ish archives: fixed owner, mtime and order.
 epoch="${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct)}"
-for d in "$g" "$x"; do
+for d in "$g" "${cross[@]}" "$x"; do
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$epoch" \
         -C "$rel" -czf "$rel/$d.tar.gz" "$d"
     rm -rf "${rel:?}/$d"

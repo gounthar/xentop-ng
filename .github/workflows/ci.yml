@@ -51,6 +51,20 @@ jobs:
       - run: rustup toolchain install 1.88 --profile minimal
       - run: cargo +1.88 check --locked --all-targets
 
+  cross:
+    name: check arm64, riscv64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Type-check only: build/build-cross.sh links and tests them under
+      # qemu at release time.
+      - name: Toolchain (pinned in rust-toolchain.toml)
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal -c clippy -t aarch64-unknown-linux-gnu,riscv64gc-unknown-linux-gnu
+      - run: cargo clippy --locked --target aarch64-unknown-linux-gnu -- -D warnings
+      - run: cargo clippy --locked --target riscv64gc-unknown-linux-gnu -- -D warnings
+
   deny:
     name: advisories & licenses
     runs-on: ubuntu-latest
