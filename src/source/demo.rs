@@ -657,6 +657,7 @@ impl DemoSource {
                             rd_sects: 0,
                             wr_sects: 0,
                             error: false,
+                            connecting: false,
                             ext: None,
                             backing: Some(backing),
                         },

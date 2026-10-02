@@ -917,6 +917,7 @@ Report bugs to <xen-devel@lists.xen.org>.
                         rd_sects: n[6],
                         wr_sects: n[7],
                         error: n[2] != 0,
+                        connecting: false,
                         ext: None,
                         backing: None,
                     });

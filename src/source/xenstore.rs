@@ -197,6 +197,13 @@ impl StorageMap {
                     break;
                 }
                 let node = format!("/local/domain/0/backend/{dir}/{}/{}", d.id, v.dev);
+                if v.error && backend_connecting(xs.read(&format!("{node}/state")).as_deref()) {
+                    // tapdisk creates its stats file only once the guest's
+                    // frontend connects (seconds into a boot): nothing to
+                    // read yet is not a failed read.
+                    v.error = false;
+                    v.connecting = true;
+                }
                 let key = (d.id, v.dev);
                 let backing = match xs.read(&format!("{node}/params")) {
                     // Transient failure, or the backend going away during an
@@ -465,6 +472,14 @@ fn kind_from_target(target: &str, sr: &str, mounts: &str) -> Option<String> {
     None
 }
 
+/// A backend not yet in XenbusStateConnected (4). Unreadable or unknown
+/// state is not evidence of connecting: the error stands.
+fn backend_connecting(state: Option<&str>) -> bool {
+    state
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .is_some_and(|s| s < 4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +492,17 @@ mod tests {
             sr: Some(sr.into()),
             vdi: Some(vdi.into()),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn backend_state_before_connected_is_connecting() {
+        for s in ["1", "2", "3", " 3\n"] {
+            assert!(backend_connecting(Some(s)), "{s:?}");
+        }
+        // Connected, closing/closed, unknown or unreadable: keep the error.
+        for s in [Some("4"), Some("5"), Some("6"), Some("x"), Some(""), None] {
+            assert!(!backend_connecting(s), "{s:?}");
         }
     }
 

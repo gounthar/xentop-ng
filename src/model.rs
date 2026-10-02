@@ -159,6 +159,9 @@ pub struct VbdRaw {
     pub rd_sects: u64,
     pub wr_sects: u64,
     pub error: bool,
+    /// The backend has not connected yet (e.g. a booting guest), so there
+    /// are no stats to read: pending, not a collection failure.
+    pub connecting: bool,
     pub ext: Option<VbdExt>,
     /// What the disk is backed by, from xenstore; `None` when unknown.
     pub backing: Option<Backing>,
@@ -534,6 +537,8 @@ fn same_backing(a: &Option<Backing>, b: &Option<Backing>) -> bool {
 fn valid_vbd_pair(prev: &VbdRaw, cur: &VbdRaw) -> bool {
     !prev.error
         && !cur.error
+        && !prev.connecting
+        && !cur.connecting
         && same_backing(&prev.backing, &cur.backing)
         && cur.rd_reqs >= prev.rd_reqs
         && cur.wr_reqs >= prev.wr_reqs
@@ -638,7 +643,9 @@ pub fn compute(prev: &Snapshot, cur: &Snapshot) -> Rates {
                 kind: Some(v.kind),
                 errors: v.ext.map(|e| e.io_errors).unwrap_or(0),
                 collection_error: v.error,
-                warming_up: !v.error && pv.is_none_or(|pv| !same_backing(&pv.backing, &v.backing)),
+                warming_up: !v.error
+                    && (v.connecting
+                        || pv.is_none_or(|pv| pv.connecting || !same_backing(&pv.backing, &v.backing))),
                 backing: v.backing.clone().unwrap_or_default(),
                 ..Default::default()
             };
@@ -845,6 +852,7 @@ mod rate_tests {
                 rd_sects: 0,
                 wr_sects: 0,
                 error: false,
+                connecting: false,
                 ext: None,
                 backing: None,
             }],
@@ -882,6 +890,27 @@ mod rate_tests {
             assert_eq!(r.domains[0].disk_errors, 0);
         }
         let r = compute(&recovered, &next);
+        assert!(r.domains[0].vbds[0].stats_valid);
+        assert_eq!(r.host.disk_rd_iops, 10.0);
+    }
+
+    #[test]
+    fn booting_disk_is_pending_until_it_has_a_baseline() {
+        let t = Instant::now();
+        let mut connecting = snap(t, vec![dom(9, "vm", 0, 0)]);
+        connecting.domains[0].vbds[0].connecting = true;
+        let mut later = connecting.clone();
+        later.at += Duration::from_secs(1);
+        let first = snap(t + Duration::from_secs(2), vec![dom(9, "vm", 0, 5_000)]);
+        let next = snap(t + Duration::from_secs(3), vec![dom(9, "vm", 0, 5_010)]);
+        for (a, b) in [(&connecting, &later), (&later, &first)] {
+            let r = compute(a, b);
+            let v = &r.domains[0].vbds[0];
+            assert!(v.warming_up && !v.stats_valid && !v.collection_error);
+            assert!(r.host.disk_samples.complete(), "not partial data");
+            assert_eq!(r.host.disk_rd_iops, 0.0, "no spike from a zero baseline");
+        }
+        let r = compute(&first, &next);
         assert!(r.domains[0].vbds[0].stats_valid);
         assert_eq!(r.host.disk_rd_iops, 10.0);
     }
@@ -1047,6 +1076,7 @@ mod rate_tests {
             rd_sects: reqs * 8,
             wr_sects: 0,
             error: false,
+            connecting: false,
             ext: Some(VbdExt {
                 rd_done: reqs,
                 wr_done: reqs,
@@ -1297,6 +1327,7 @@ mod overflow_tests {
             rd_sects: u64::MAX,
             wr_sects: u64::MAX,
             error: true,
+            connecting: false,
             ext: Some(VbdExt {
                 rd_done: u64::MAX,
                 wr_done: u64::MAX,

@@ -21,7 +21,8 @@ release binaries are on the [releases page](https://github.com/olivierlambert/xe
   discard disk intervals spanning failed reads. Preserve known VM UUIDs
   across transient xenstore read failures without requiring XAPI.
 - Preserve partial disk sums in host, VM and SR graphs. New disks wait for
-  a baseline without marking coverage degraded; missing measurements show
+  a baseline without marking coverage degraded, as do a booting guest's
+  disks until their backend connects; missing measurements show
   gaps rather than zero. Highlight disk collection failures separately
   from disk-reported I/O errors.
 - Keep physical CPU history attached to its CPU ID across hotplug; newly

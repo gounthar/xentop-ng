@@ -157,8 +157,10 @@ pub fn latency_coverage(snap: &Snapshot) -> Coverage {
         .flat_map(|d| &d.vbds)
         .filter(|v| v.kind == VbdKind::Vbd3)
         .collect();
+    // A disk whose backend hasn't connected has no counters yet.
+    let (connecting, disks): (Vec<_>, Vec<_>) = disks.into_iter().partition(|v| v.connecting);
     Coverage {
-        pending: 0,
+        pending: connecting.len(),
         total: disks.len(),
         available: disks.iter().filter(|v| v.ext.is_some() && !v.error).count(),
     }
@@ -252,6 +254,7 @@ mod tests {
             rd_sects: 0,
             wr_sects: 0,
             error: false,
+            connecting: false,
             ext,
             backing: None,
         }
@@ -412,6 +415,16 @@ mod tests {
                 pending: 0,
                 available: 1,
                 total: 2
+            }
+        );
+        s.domains[0].vbds[1].connecting = true;
+        assert_eq!(fill(&mut s, true, &mut f).vbd_latency, Avail::Lib);
+        assert_eq!(
+            latency_coverage(&s),
+            Coverage {
+                pending: 1,
+                available: 1,
+                total: 1
             }
         );
     }

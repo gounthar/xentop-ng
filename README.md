@@ -300,7 +300,8 @@ retain their synchronous sampling and output behavior.
 
 Measurement coverage is included in JSON: `disk_samples` counts valid disk
 intervals at host/domain/SR level. Its `pending` count tracks healthy new disks
-waiting for a baseline, excluded from `total` and from degraded coverage.
+waiting for a baseline, and disks whose backend has not connected yet (a
+booting guest), excluded from `total` and from degraded coverage.
 `sources.vbd_latency_coverage` and `sources.steal_coverage` count available
 counters. `partial` is a source status.
 Disk rates are sums over valid devices; the UI marks partial sums with `*`
