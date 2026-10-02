@@ -11,6 +11,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Widget};
 use ratatui::Frame;
+use std::cell::Cell;
+use std::time::{Duration, Instant};
 use widgets::*;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -316,6 +318,47 @@ fn header(buf: &mut Buffer, app: &App, area: Rect) {
 // ---------------------------------------------------------------------------
 // CPU
 
+/// How long a name column keeps its width after the name that needed it
+/// is gone: short-lived VMs (CI jobs, backups) would otherwise shift the
+/// columns every time one starts or stops.
+const NAME_HOLD: Duration = Duration::from_secs(30);
+
+/// A width that grows at once and shrinks only once nothing has needed it
+/// for [`NAME_HOLD`].
+#[derive(Default)]
+pub struct StickyWidth(Cell<(usize, Option<Instant>)>);
+
+impl StickyWidth {
+    pub fn hold(&self, want: usize, now: Instant) -> usize {
+        let (w, seen) = self.0.get();
+        let keep = want < w && seen.is_some_and(|t| now.duration_since(t) < NAME_HOLD);
+        if keep {
+            return w;
+        }
+        self.0.set((want, Some(now)));
+        want
+    }
+}
+
+/// Name widths kept across frames, one per place names are listed.
+#[derive(Default)]
+pub struct NameWidths {
+    pub table: StickyWidth,
+    pub cpu: StickyWidth,
+    pub mem: StickyWidth,
+}
+
+/// Width of a name next to a meter: as long as the longest name, up to
+/// half of `room` (what the name and meter share), never capped below
+/// `floor`.
+fn name_width(longest: usize, room: usize, floor: usize) -> usize {
+    longest.min((room / 2).max(floor))
+}
+
+fn longest_name<'a>(doms: impl IntoIterator<Item = &'a DomRates>) -> usize {
+    doms.into_iter().map(|d| fmt::width(&d.name)).max().unwrap_or(0)
+}
+
 fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     let th = app.theme();
     let h = &r.host;
@@ -451,7 +494,15 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             w as u16,
             &Line::from(dim(th, "top domains  (no per-pCPU data, see i)")),
         );
-        let mw = w.saturating_sub(14 + 6 + 2);
+        // Sized on every domain, not just the rows drawn: these change
+        // order every second.
+        let room = w.saturating_sub(4 + 1 + 6 + 2);
+        let longest = app
+            .name_w
+            .cpu
+            .hold(longest_name(r.domains.iter()), Instant::now());
+        let nw = name_width(longest, room, 9);
+        let mw = room.saturating_sub(nw);
         for (i, d) in doms.iter().take(rows.saturating_sub(1)).enumerate() {
             let cap = (d.vcpus_online.max(1) * 100) as f64;
             // IDs next to names: anyone who can rename a VM can call it
@@ -459,7 +510,7 @@ fn cpu_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
             let mut sp = vec![
                 dim(th, format!("{:>3} ", d.id)),
                 Span::styled(
-                    format!("{} ", fmt::pad(&d.name, 9, false)),
+                    format!("{} ", fmt::pad(&d.name, nw, false)),
                     Style::new().fg(th.fg),
                 ),
             ];
@@ -715,7 +766,12 @@ fn mem_box(buf: &mut Buffer, app: &App, r: &Rates, area: Rect) {
     }
     let mut doms: Vec<&DomRates> = r.domains.iter().collect();
     doms.sort_by_key(|d| std::cmp::Reverse(d.mem));
-    let nw = (w / 3).clamp(8, 16);
+    // Sized on the rows drawn (biggest first, a stable order): a wide box
+    // (cpu box hidden) shows them in full.
+    let room = w.saturating_sub(4 + 1 + 7);
+    let shown = doms.iter().take(bottom.saturating_sub(y) as usize).copied();
+    let longest = app.name_w.mem.hold(longest_name(shown), Instant::now());
+    let nw = name_width(longest, room, (w / 3).clamp(8, 16) - 4) + 4;
     let mw = w.saturating_sub(nw + 1 + 7);
     for d in doms {
         if y >= bottom {
@@ -975,6 +1031,7 @@ enum SrCol {
 /// what's left.
 /// `sr_w` and `kind_w` are what the SR names and types would like.
 fn sr_cols(width: usize, sr_w: usize, kind_w: usize) -> Vec<(SrCol, usize)> {
+    let sr_full = sr_w.max(8);
     let sr_w = sr_w.clamp(8, 20);
     // (column, width, priority: lower = kept longer)
     let all = [
@@ -998,8 +1055,15 @@ fn sr_cols(width: usize, sr_w: usize, kind_w: usize) -> Vec<(SrCol, usize)> {
         let used: usize = cols.iter().map(|c| c.1 + 1).sum();
         if used <= width || max_prio == 0 {
             let mut spare = width.saturating_sub(used);
-            // VM names readable first, then a longer trend, then the rest.
-            for (col, max) in [(SrCol::Top, 8), (SrCol::Trend, 20), (SrCol::Top, 16)] {
+            // VM names readable first, then a longer trend, then the rest,
+            // then SR names past 20 columns.
+            let more = [
+                (SrCol::Top, 8),
+                (SrCol::Trend, 20),
+                (SrCol::Top, 16),
+                (SrCol::Sr, sr_full - sr_w),
+            ];
+            for (col, max) in more {
                 if let Some(c) = cols.iter_mut().find(|c| c.0 == col) {
                     let add = spare.min(max);
                     c.1 += add;
@@ -1312,7 +1376,13 @@ fn domains_box(buf: &mut Buffer, app: &mut App, r: &Rates, area: Rect) {
     let vis_ids: Vec<u32> = app.visible().iter().map(|d| d.id).collect();
     let arrow = if app.reverse { "▲" } else { "▼" };
     let inner_w = area.width.saturating_sub(2);
-    let (cols, dropped) = columns::layout(&app.enabled_columns(), inner_w);
+    // Every domain, filtered out or not: typing a filter doesn't move the
+    // columns.
+    let name_w = app
+        .name_w
+        .table
+        .hold(longest_name(r.domains.iter()), Instant::now());
+    let (cols, dropped) = columns::layout(&app.enabled_columns(), inner_w, name_w);
     let mut right = vec![
         Span::styled(format!("{}", vis_ids.len()), Style::new().fg(th.fg)),
         dim(
@@ -2121,7 +2191,43 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn sticky_width_grows_now_and_shrinks_late() {
+        let w = super::StickyWidth::default();
+        let t0 = Instant::now();
+        assert_eq!(w.hold(10, t0), 10);
+        assert_eq!(w.hold(30, t0 + Duration::from_secs(1)), 30, "grows at once");
+        assert_eq!(w.hold(10, t0 + Duration::from_secs(20)), 30, "held");
+        assert_eq!(w.hold(30, t0 + Duration::from_secs(25)), 30, "needed again");
+        assert_eq!(w.hold(10, t0 + Duration::from_secs(50)), 30, "hold restarted");
+        assert_eq!(w.hold(10, t0 + Duration::from_secs(56)), 10, "then shrinks");
+    }
+
+    #[test]
+    fn name_width_fits_within_half_the_room() {
+        use super::name_width;
+        assert_eq!(name_width(40, 200, 12), 40, "fits in full");
+        assert_eq!(name_width(40, 60, 12), 30, "half the room");
+        assert_eq!(name_width(40, 16, 12), 12, "never below the floor");
+        assert_eq!(name_width(5, 200, 12), 5, "short names leave room to the meter");
+    }
+
+    #[test]
+    fn sr_names_take_the_leftover_width() {
+        use super::{sr_cols, SrCol};
+        let sr = |w| {
+            sr_cols(w, 30, 4)
+                .into_iter()
+                .find(|c| c.0 == SrCol::Sr)
+                .unwrap()
+                .1
+        };
+        assert_eq!(sr(300), 30, "in full when there is room");
+        assert_eq!(sr(110), 20, "spare goes to TOP VM and the trend first");
+        assert!(sr(60) >= 8);
+    }
 
     fn app(cfg: &DemoConfig) -> App {
         let mut src = DemoSource::new(cfg);

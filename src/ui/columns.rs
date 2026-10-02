@@ -463,9 +463,15 @@ pub fn defaults() -> Vec<(&'static str, bool)> {
 }
 
 /// Lay out the enabled columns (in the user's order) for `width` cells.
-/// Columns are dropped by priority until the rest fit. Returns the columns
-/// with their widths, and the ids of enabled columns that didn't fit.
-pub fn layout(enabled: &[&'static Column], width: u16) -> (Vec<(&'static Column, usize)>, Vec<&'static str>) {
+/// Columns are dropped by priority until the rest fit; `name_w` (the
+/// longest name) only decides how much of the spare width the name takes.
+/// Returns the columns with their widths, and the ids of enabled columns
+/// that didn't fit.
+pub fn layout(
+    enabled: &[&'static Column],
+    width: u16,
+    name_w: usize,
+) -> (Vec<(&'static Column, usize)>, Vec<&'static str>) {
     let width = width as usize;
     let mut max_prio = enabled.iter().map(|c| c.priority).max().unwrap_or(0);
     loop {
@@ -477,12 +483,19 @@ pub fn layout(enabled: &[&'static Column], width: u16) -> (Vec<(&'static Column,
         let used: usize = cols.iter().map(|c| c.1 + 1).sum();
         if used <= width || max_prio == 0 {
             let mut extra = width.saturating_sub(used);
-            // Grow the name a bit, then give everything else to the flexible
-            // column (the history). Without one, the name grows a bit more
-            // and the rest stays blank at the end of the row.
+            // Grow the name a bit, or to the longest name (up to half the
+            // spare width next to a flexible column), then give everything
+            // else to the flexible column (the history). Without one, the
+            // rest stays blank at the end of the row.
             let flex = cols.iter().any(|c| c.0.flex);
             if let Some(c) = cols.iter_mut().find(|c| c.0.id == "name") {
-                let g = extra.min(if flex { 12 } else { 26 });
+                let need = name_w.saturating_sub(c.1);
+                let g = if flex {
+                    need.min((extra / 2).max(12)).max(12)
+                } else {
+                    need.max(26)
+                }
+                .min(extra);
                 c.1 += g;
                 extra -= g;
             }
@@ -583,13 +596,13 @@ mod tests {
     #[test]
     fn layout_drops_by_priority_and_reports_it() {
         let all: Vec<&Column> = COLUMNS.iter().collect();
-        let (cols, dropped) = layout(&all, 300);
+        let (cols, dropped) = layout(&all, 300, 8);
         assert_eq!(cols.len(), COLUMNS.len());
         assert!(dropped.is_empty());
         let total: usize = cols.iter().map(|c| c.1 + 1).sum();
         assert_eq!(total, 300, "spare width is handed out");
 
-        let (cols, dropped) = layout(&all, 80);
+        let (cols, dropped) = layout(&all, 80, 8);
         let used: usize = cols.iter().map(|c| c.1 + 1).sum();
         assert!(used <= 80);
         assert!(!dropped.is_empty());
@@ -600,11 +613,29 @@ mod tests {
         // User order is preserved.
         let mut mine: Vec<&Column> = ["mem", "name", "id"].iter().map(|i| column(i).unwrap()).collect();
         mine.push(column("lat").unwrap());
-        let (cols, _) = layout(&mine, 200);
+        let (cols, _) = layout(&mine, 200, 8);
         let ids: Vec<&str> = cols.iter().map(|c| c.0.id).collect();
         assert_eq!(ids, ["mem", "name", "id", "lat"]);
         // Absurdly narrow: priority-0 columns stay, nothing panics.
-        let (cols, _) = layout(&all, 3);
+        let (cols, _) = layout(&all, 3, 8);
         assert!(cols.iter().all(|c| c.0.priority == 0));
+    }
+
+    #[test]
+    fn layout_grows_the_name_to_fit() {
+        let all: Vec<&Column> = COLUMNS.iter().collect();
+        let name = |cols: &[(&Column, usize)]| cols.iter().find(|c| c.0.id == "name").unwrap().1;
+        let (short, _) = layout(&all, 300, 8);
+        assert_eq!(name(&short), 14 + 12, "short names: as before");
+        let (long, _) = layout(&all, 300, 40);
+        assert_eq!(name(&long), 40, "a long name fits when there is room");
+        let hist = long.iter().find(|c| c.0.flex).unwrap().1;
+        assert!(hist >= 40, "the history keeps half the spare width");
+        // Long names never push a column out.
+        let (a, da) = layout(&all, 120, 8);
+        let (b, db) = layout(&all, 120, 64);
+        assert_eq!((a.len(), da), (b.len(), db));
+        let used: usize = b.iter().map(|c| c.1 + 1).sum();
+        assert!(used <= 120);
     }
 }
